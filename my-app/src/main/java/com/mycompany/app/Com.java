@@ -26,6 +26,16 @@ public class Com {
 
     public final Mailbox mailbox;
 
+    // Section critique - gestion du jeton
+    private volatile boolean hasToken;
+    private volatile boolean wantsToEnterCS;
+    private final Object tokenLock = new Object();
+    private final Semaphore csAccess = new Semaphore(0);
+
+    // Synchronisation
+    private final Map<Integer, SyncMessage> syncMessages = new ConcurrentHashMap<>();
+    private final Semaphore syncBarrier = new Semaphore(0);
+
     /**
      * Constructeur du communicateur.
      * Initialise l'horloge de Lamport et la boîte aux lettres.
@@ -35,7 +45,18 @@ public class Com {
         this.clockSemaphore = new Semaphore(1);
         this.lamportClock = 0;
         this.mailbox = new Mailbox();
+        this.hasToken = false;
+        this.wantsToEnterCS = false;
+
         processes.put(processId, this);
+
+        // Enregistrer ce processus auprès du gestionnaire de jeton
+        TokenManager.getInstance().registerProcess(processId, this);
+
+        // Démarrer le gestionnaire de jeton si c'est le premier processus
+        if (processId == 0) {
+            TokenManager.getInstance().start();
+        }
     }
 
     /**
@@ -103,7 +124,7 @@ public class Com {
     public void broadcast(Object o) {
         inc_clock();
         int timestamp = getCurrentClock();
-        Message message = new Message(o, timestamp, processId);
+        UserMessage message = new UserMessage(o, timestamp, processId);
 
         for (Com process : processes.values()) {
             if (process.processId != this.processId) {
@@ -121,7 +142,7 @@ public class Com {
     public void sendTo(Object o, int dest) {
         inc_clock();
         int timestamp = getCurrentClock();
-        Message message = new Message(o, timestamp, processId);
+        UserMessage message = new UserMessage(o, timestamp, processId);
 
         Com destProcess = processes.get(dest);
         if (destProcess != null) {
@@ -131,11 +152,14 @@ public class Com {
 
     /**
      * Reçoit un message et le place dans la boîte aux lettres.
+     * Ne met à jour l'horloge que pour les messages non-système.
      *
      * @param message Le message reçu
      */
     private void receiveMessage(Message message) {
-        updateClock(message.getTimestamp());
+        if (!message.isSystemMessage()) {
+            updateClock(message.getTimestamp());
+        }
         mailbox.putMessage(message);
     }
 
@@ -155,5 +179,138 @@ public class Com {
      */
     public static Map<Integer, Com> getAllProcesses() {
         return new HashMap<>(processes);
+    }
+
+    /**
+     * Demande l'accès à la section critique.
+     * Bloque jusqu'à obtention du jeton.
+     */
+    public void requestSC() {
+        synchronized (tokenLock) {
+            wantsToEnterCS = true;
+            System.out.println("Processus " + processId + " demande l'accès à la section critique");
+
+            // Si le processus a déjà le jeton, il peut entrer directement
+            if (hasToken) {
+                System.out.println("Processus " + processId + " a déjà le jeton, accès immédiat à la SC");
+                return;
+            }
+        }
+
+        // Attendre le jeton
+        try {
+            System.out.println("Processus " + processId + " attend le jeton...");
+            csAccess.acquire();
+            System.out.println("Processus " + processId + " a obtenu l'accès à la section critique");
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            wantsToEnterCS = false;
+        }
+    }
+
+    /**
+     * Libère la section critique et passe le jeton au processus suivant.
+     */
+    public void releaseSC() {
+        synchronized (tokenLock) {
+            wantsToEnterCS = false;
+
+            if (hasToken) {
+                System.out.println("Processus " + processId + " libère la section critique et passe le jeton");
+                hasToken = false;
+                TokenManager.getInstance().passToken();
+            }
+        }
+    }
+
+    /**
+     * Reçoit un message de jeton (message système).
+     *
+     * @param tokenMessage Le message contenant le jeton
+     */
+    public void receiveTokenMessage(TokenMessage tokenMessage) {
+        synchronized (tokenLock) {
+            hasToken = true;
+            System.out.println("Processus " + processId + " a reçu le jeton de " + tokenMessage.getSender());
+
+            // Si le processus veut entrer en section critique, lui donner accès
+            if (wantsToEnterCS) {
+                csAccess.release();
+            }
+        }
+    }
+
+    /**
+     * Envoie un message synchrone à un processus spécifique.
+     *
+     * @param o L'objet à envoyer
+     * @param dest L'identifiant du processus destinataire
+     */
+    public void sendToSync(Object o, int dest) {
+        inc_clock();
+        int timestamp = getCurrentClock();
+        SyncMessage message = new SyncMessage(o, timestamp, processId);
+
+        Com destProcess = processes.get(dest);
+        if (destProcess != null) {
+            destProcess.receiveSyncMessage(message);
+        }
+    }
+
+    /**
+     * Reçoit un message synchrone.
+     *
+     * @param syncMessage Le message synchrone reçu
+     */
+    private void receiveSyncMessage(SyncMessage syncMessage) {
+        updateClock(syncMessage.getTimestamp());
+        syncMessages.put(syncMessage.getSender(), syncMessage);
+        syncBarrier.release();
+    }
+
+    /**
+     * Reçoit un message synchrone d'un processus spécifique.
+     *
+     * @param sender L'identifiant du processus expéditeur
+     * @return Le message reçu
+     * @throws InterruptedException Si l'attente est interrompue
+     */
+    public Message recevFromSync(int sender) throws InterruptedException {
+        // Attendre qu'un message synchrone arrive
+        syncBarrier.acquire();
+
+        // Chercher le message du bon expéditeur
+        SyncMessage message = syncMessages.remove(sender);
+        if (message == null) {
+            // Si ce n'est pas le bon expéditeur, remettre le permis et essayer de nouveau
+            syncBarrier.release();
+            return recevFromSync(sender);
+        }
+
+        return message;
+    }
+
+    /**
+     * Synchronise tous les processus (barrière de synchronisation).
+     */
+    public void synchronize() {
+        System.out.println("Processus " + processId + " arrive à la barrière de synchronisation");
+
+        // Simple implémentation : attendre que tous les processus atteignent ce point
+        // Pour l'instant, on fait juste une pause pour simuler la synchronisation
+        try {
+            Thread.sleep(100);
+            System.out.println("Processus " + processId + " sort de la barrière de synchronisation");
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
+    }
+
+    /**
+     * Arrête le communicateur et nettoie les ressources.
+     */
+    public void shutdown() {
+        TokenManager.getInstance().unregisterProcess(processId);
+        processes.remove(processId);
     }
 }
