@@ -76,9 +76,16 @@ public class App {
         // Pause entre les tests
         try { Thread.sleep(2000); } catch (InterruptedException e) {}
 
-        // Jeu de dés
-        System.out.println("\n2. Jeu de dés distribué:");
-        DiceGame.main(new String[]{});
+        // Test de section critique distribuée
+        System.out.println("\n2. Test de section critique distribuée avec jeton circulaire:");
+        testCriticalSection();
+
+        // Pause entre les tests
+        try { Thread.sleep(2000); } catch (InterruptedException e) {}
+
+        // Test de synchronisation
+        System.out.println("\n3. Test de synchronisation:");
+        testSynchronization();
 
         System.out.println("\n=== DÉMONSTRATION TERMINÉE ===");
     }
@@ -128,6 +135,9 @@ public class App {
         Com com1 = new Com();
         Com com2 = new Com();
 
+        // Démarrer le gestionnaire de jeton
+        TokenManager.getInstance().start();
+
         Thread t1 = new Thread(() -> {
             try {
                 System.out.println("Processus " + com1.getProcessId() + " demande SC");
@@ -166,6 +176,7 @@ public class App {
         } finally {
             com1.shutdown();
             com2.shutdown();
+            TokenManager.getInstance().stop();
         }
     }
 

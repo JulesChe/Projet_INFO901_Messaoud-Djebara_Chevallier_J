@@ -52,11 +52,6 @@ public class Com {
 
         // Enregistrer ce processus auprès du gestionnaire de jeton
         TokenManager.getInstance().registerProcess(processId, this);
-
-        // Démarrer le gestionnaire de jeton si c'est le premier processus
-        if (processId == 0) {
-            TokenManager.getInstance().start();
-        }
     }
 
     /**

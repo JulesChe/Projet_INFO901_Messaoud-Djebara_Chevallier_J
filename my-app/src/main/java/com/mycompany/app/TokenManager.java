@@ -77,9 +77,21 @@ public class TokenManager implements Runnable {
     public void start() {
         if (!running && processRing.size() > 0) {
             running = true;
+            synchronized (ringLock) {
+                // S'assurer que le jeton part du dernier processus initialisé (plus grand ID)
+                if (!processRing.isEmpty()) {
+                    currentTokenHolder = processRing.get(0); // Premier dans la liste triée par ordre décroissant
+                    Com tokenProcess = processes.get(currentTokenHolder);
+                    if (tokenProcess != null) {
+                        TokenMessage initialToken = new TokenMessage(-1); // -1 indique l'initialisation
+                        tokenProcess.receiveTokenMessage(initialToken);
+                        System.out.println("Jeton initial donné au processus " + currentTokenHolder);
+                    }
+                }
+            }
             tokenThread = new Thread(this, "TokenManager");
             tokenThread.start();
-            System.out.println("Gestionnaire de jeton démarré");
+            System.out.println("Gestionnaire de jeton démarré avec le processus " + currentTokenHolder);
         }
     }
 
