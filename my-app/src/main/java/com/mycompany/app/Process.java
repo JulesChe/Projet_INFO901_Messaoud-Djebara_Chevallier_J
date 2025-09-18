@@ -43,62 +43,23 @@ public class Process implements Runnable {
                 Thread.sleep(500);
 
                 if ("P0".equals(this.getName())) {
-                    this.com.sendTo("j'appelle 2 et je te recontacte après", 1);
-
-                    this.com.sendToSync("J'ai laissé un message à 2, je le rappellerai après, on se synchronise tous et on attaque la partie ?", 2);
-                    Message msg = this.com.recevFromSync(2);
-
-                    this.com.sendToSync("2 est OK pour jouer, on se synchronise et c'est parti!", 1);
-
-                    this.com.synchronize();
+                    this.com.sendTo("Message du processus P0", 1);
+                    this.com.sendTo("Message du processus P0", 2);
 
                     this.com.requestSC();
-                    if (this.com.mailbox.isEmpty()) {
-                        System.out.println("Catched !");
-                        this.com.broadcast("J'ai gagné !!!");
-                    } else {
-                        msg = this.com.mailbox.getMessageNonBlocking();
-                        if (msg != null) {
-                            System.out.println(msg.getSender() + " a eu le jeton en premier");
-                        }
-                    }
+                    System.out.println("P0 est en section critique !");
+                    this.com.broadcast("P0 a obtenu la section critique !");
                     this.com.releaseSC();
 
                 } else if ("P1".equals(this.getName())) {
-                    if (!this.com.mailbox.isEmpty()) {
-                        this.com.mailbox.getMessage();
-                        Message msg = this.com.recevFromSync(0);
-
-                        this.com.synchronize();
-
-                        this.com.requestSC();
-                        if (this.com.mailbox.isEmpty()) {
-                            System.out.println("Catched !");
-                            this.com.broadcast("J'ai gagné !!!");
-                        } else {
-                            msg = this.com.mailbox.getMessageNonBlocking();
-                            if (msg != null) {
-                                System.out.println(msg.getSender() + " a eu le jeton en premier");
-                            }
-                        }
-                        this.com.releaseSC();
-                    }
-                } else if ("P2".equals(this.getName())) {
-                    Message msg = this.com.recevFromSync(0);
-                    this.com.sendToSync("OK", 0);
-
-                    this.com.synchronize();
-
                     this.com.requestSC();
-                    if (this.com.mailbox.isEmpty()) {
-                        System.out.println("Catched !");
-                        this.com.broadcast("J'ai gagné !!!");
-                    } else {
-                        msg = this.com.mailbox.getMessageNonBlocking();
-                        if (msg != null) {
-                            System.out.println(msg.getSender() + " a eu le jeton en premier");
-                        }
-                    }
+                    System.out.println("P1 est en section critique !");
+                    this.com.broadcast("P1 a obtenu la section critique !");
+                    this.com.releaseSC();
+                } else if ("P2".equals(this.getName())) {
+                    this.com.requestSC();
+                    System.out.println("P2 est en section critique !");
+                    this.com.broadcast("P2 a obtenu la section critique !");
                     this.com.releaseSC();
                 }
 

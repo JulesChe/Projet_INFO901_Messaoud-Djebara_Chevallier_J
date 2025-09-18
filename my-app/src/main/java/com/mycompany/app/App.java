@@ -25,9 +25,6 @@ public class App {
             case "process":
                 runProcessExample();
                 break;
-            case "dice":
-                DiceGame.main(args);
-                break;
             case "demo":
             default:
                 runCompleteDemo();
@@ -45,6 +42,9 @@ public class App {
         Process p1 = new Process("P1");
         Process p2 = new Process("P2");
 
+        // Démarrer le TokenManager
+        TokenManager.getInstance().start();
+
         try {
             Thread.sleep(10000);
 
@@ -58,6 +58,8 @@ public class App {
 
         } catch (InterruptedException e) {
             e.printStackTrace();
+        } finally {
+            TokenManager.getInstance().stop();
         }
 
         System.out.println("Exemple de processus terminé.");
@@ -83,9 +85,6 @@ public class App {
         // Pause entre les tests
         try { Thread.sleep(2000); } catch (InterruptedException e) {}
 
-        // Test de synchronisation
-        System.out.println("\n3. Test de synchronisation:");
-        testSynchronization();
 
         System.out.println("\n=== DÉMONSTRATION TERMINÉE ===");
     }
@@ -180,60 +179,4 @@ public class App {
         }
     }
 
-    /**
-     * Test de synchronisation.
-     */
-    private static void testSynchronization() {
-        Com com1 = new Com();
-        Com com2 = new Com();
-        Com com3 = new Com();
-
-        Thread t1 = new Thread(() -> {
-            try {
-                System.out.println("Processus " + com1.getProcessId() + " arrive à la barrière");
-                com1.synchronize();
-                System.out.println("Processus " + com1.getProcessId() + " passe la barrière");
-            } catch (Exception e) {
-                e.printStackTrace();
-            }
-        });
-
-        Thread t2 = new Thread(() -> {
-            try {
-                Thread.sleep(1000);
-                System.out.println("Processus " + com2.getProcessId() + " arrive à la barrière");
-                com2.synchronize();
-                System.out.println("Processus " + com2.getProcessId() + " passe la barrière");
-            } catch (Exception e) {
-                e.printStackTrace();
-            }
-        });
-
-        Thread t3 = new Thread(() -> {
-            try {
-                Thread.sleep(2000);
-                System.out.println("Processus " + com3.getProcessId() + " arrive à la barrière");
-                com3.synchronize();
-                System.out.println("Processus " + com3.getProcessId() + " passe la barrière");
-            } catch (Exception e) {
-                e.printStackTrace();
-            }
-        });
-
-        t1.start();
-        t2.start();
-        t3.start();
-
-        try {
-            t1.join();
-            t2.join();
-            t3.join();
-        } catch (InterruptedException e) {
-            e.printStackTrace();
-        } finally {
-            com1.shutdown();
-            com2.shutdown();
-            com3.shutdown();
-        }
-    }
 }

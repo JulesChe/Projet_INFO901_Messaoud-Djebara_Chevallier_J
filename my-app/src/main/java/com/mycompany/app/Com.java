@@ -32,9 +32,6 @@ public class Com {
     private final Object tokenLock = new Object();
     private final Semaphore csAccess = new Semaphore(0);
 
-    // Synchronisation
-    private final Map<Integer, SyncMessage> syncMessages = new ConcurrentHashMap<>();
-    private final Semaphore syncBarrier = new Semaphore(0);
 
     /**
      * Constructeur du communicateur.
@@ -235,71 +232,7 @@ public class Com {
         }
     }
 
-    /**
-     * Envoie un message synchrone à un processus spécifique.
-     *
-     * @param o L'objet à envoyer
-     * @param dest L'identifiant du processus destinataire
-     */
-    public void sendToSync(Object o, int dest) {
-        inc_clock();
-        int timestamp = getCurrentClock();
-        SyncMessage message = new SyncMessage(o, timestamp, processId);
 
-        Com destProcess = processes.get(dest);
-        if (destProcess != null) {
-            destProcess.receiveSyncMessage(message);
-        }
-    }
-
-    /**
-     * Reçoit un message synchrone.
-     *
-     * @param syncMessage Le message synchrone reçu
-     */
-    private void receiveSyncMessage(SyncMessage syncMessage) {
-        updateClock(syncMessage.getTimestamp());
-        syncMessages.put(syncMessage.getSender(), syncMessage);
-        syncBarrier.release();
-    }
-
-    /**
-     * Reçoit un message synchrone d'un processus spécifique.
-     *
-     * @param sender L'identifiant du processus expéditeur
-     * @return Le message reçu
-     * @throws InterruptedException Si l'attente est interrompue
-     */
-    public Message recevFromSync(int sender) throws InterruptedException {
-        // Attendre qu'un message synchrone arrive
-        syncBarrier.acquire();
-
-        // Chercher le message du bon expéditeur
-        SyncMessage message = syncMessages.remove(sender);
-        if (message == null) {
-            // Si ce n'est pas le bon expéditeur, remettre le permis et essayer de nouveau
-            syncBarrier.release();
-            return recevFromSync(sender);
-        }
-
-        return message;
-    }
-
-    /**
-     * Synchronise tous les processus (barrière de synchronisation).
-     */
-    public void synchronize() {
-        System.out.println("Processus " + processId + " arrive à la barrière de synchronisation");
-
-        // Simple implémentation : attendre que tous les processus atteignent ce point
-        // Pour l'instant, on fait juste une pause pour simuler la synchronisation
-        try {
-            Thread.sleep(100);
-            System.out.println("Processus " + processId + " sort de la barrière de synchronisation");
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-        }
-    }
 
     /**
      * Arrête le communicateur et nettoie les ressources.
