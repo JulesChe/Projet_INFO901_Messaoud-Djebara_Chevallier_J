@@ -46,17 +46,26 @@ public class Process implements Runnable {
                     this.com.sendTo("Message du processus P0", 1);
                     this.com.sendTo("Message du processus P0", 2);
 
+                    // Test de la barrière de synchronisation
+                    this.com.synchronize();
+
                     this.com.requestSC();
                     System.out.println("P0 est en section critique !");
                     this.com.broadcast("P0 a obtenu la section critique !");
                     this.com.releaseSC();
 
                 } else if ("P1".equals(this.getName())) {
+                    // Test de la barrière de synchronisation
+                    this.com.synchronize();
+
                     this.com.requestSC();
                     System.out.println("P1 est en section critique !");
                     this.com.broadcast("P1 a obtenu la section critique !");
                     this.com.releaseSC();
                 } else if ("P2".equals(this.getName())) {
+                    // Test de la barrière de synchronisation
+                    this.com.synchronize();
+
                     this.com.requestSC();
                     System.out.println("P2 est en section critique !");
                     this.com.broadcast("P2 a obtenu la section critique !");

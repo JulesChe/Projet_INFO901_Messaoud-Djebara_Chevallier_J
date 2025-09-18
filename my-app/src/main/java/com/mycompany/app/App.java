@@ -85,6 +85,9 @@ public class App {
         // Pause entre les tests
         try { Thread.sleep(2000); } catch (InterruptedException e) {}
 
+        // Test de synchronisation
+        System.out.println("\n3. Test de barrière de synchronisation:");
+        testSynchronization();
 
         System.out.println("\n=== DÉMONSTRATION TERMINÉE ===");
     }
@@ -177,6 +180,79 @@ public class App {
             com2.shutdown();
             TokenManager.getInstance().stop();
         }
+    }
+
+    /**
+     * Test de barrière de synchronisation selon les concepts de @CM/LaBarriereDeSynchro.pdf.
+     * Démontre que tous les processus attendent à la barrière et repartent ensemble.
+     */
+    private static void testSynchronization() {
+        Com com1 = new Com();
+        Com com2 = new Com();
+        Com com3 = new Com();
+
+        System.out.println("Création de 3 processus pour tester la barrière de synchronisation:");
+        System.out.println("- Les processus arrivent à des moments différents");
+        System.out.println("- Ils attendent tous à la barrière");
+        System.out.println("- Tous repartent ensemble quand le dernier arrive\n");
+
+        Thread t1 = new Thread(() -> {
+            try {
+                System.out.println("[" + System.currentTimeMillis() + "] Processus " + com1.getProcessId() + " travaille avant la barrière...");
+                Thread.sleep(100);  // Simule du travail
+
+                com1.synchronize();  // BARRIÈRE
+
+                System.out.println("[" + System.currentTimeMillis() + "] Processus " + com1.getProcessId() + " continue après la barrière");
+            } catch (Exception e) {
+                e.printStackTrace();
+            }
+        }, "SyncTest-P1");
+
+        Thread t2 = new Thread(() -> {
+            try {
+                System.out.println("[" + System.currentTimeMillis() + "] Processus " + com2.getProcessId() + " travaille avant la barrière...");
+                Thread.sleep(800);  // Simule plus de travail
+
+                com2.synchronize();  // BARRIÈRE
+
+                System.out.println("[" + System.currentTimeMillis() + "] Processus " + com2.getProcessId() + " continue après la barrière");
+            } catch (Exception e) {
+                e.printStackTrace();
+            }
+        }, "SyncTest-P2");
+
+        Thread t3 = new Thread(() -> {
+            try {
+                System.out.println("[" + System.currentTimeMillis() + "] Processus " + com3.getProcessId() + " travaille avant la barrière...");
+                Thread.sleep(1500);  // Simule encore plus de travail
+
+                com3.synchronize();  // BARRIÈRE
+
+                System.out.println("[" + System.currentTimeMillis() + "] Processus " + com3.getProcessId() + " continue après la barrière");
+            } catch (Exception e) {
+                e.printStackTrace();
+            }
+        }, "SyncTest-P3");
+
+        // Démarrer tous les threads
+        t1.start();
+        t2.start();
+        t3.start();
+
+        try {
+            t1.join();
+            t2.join();
+            t3.join();
+        } catch (InterruptedException e) {
+            e.printStackTrace();
+        } finally {
+            com1.shutdown();
+            com2.shutdown();
+            com3.shutdown();
+        }
+
+        System.out.println("\nTest de barrière terminé - Tous les processus ont passé la barrière ensemble !");
     }
 
 }

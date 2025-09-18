@@ -32,6 +32,12 @@ public class Com {
     private final Object tokenLock = new Object();
     private final Semaphore csAccess = new Semaphore(0);
 
+    // Barrière de synchronisation
+    private static volatile int processesAtBarrier = 0;
+    private static volatile int barrierGeneration = 0;
+    private static final Object barrierLock = new Object();
+    private volatile boolean atBarrier = false;
+
 
     /**
      * Constructeur du communicateur.
@@ -232,7 +238,75 @@ public class Com {
         }
     }
 
+    /**
+     * Synchronise tous les processus (barrière de synchronisation).
+     * Attend que tous les processus aient invoqué cette méthode pour tous les débloquer.
+     *
+     * Algorithme basé sur les concepts de @CM/LaBarriereDeSynchro.pdf :
+     * 1) Le processus s'arrête à la barrière
+     * 2) Attend que tous les autres processus arrivent
+     * 3) Tous repartent ensemble
+     */
+    public void synchronize() {
+        System.out.println("Processus " + processId + " arrive à la barrière de synchronisation");
 
+        synchronized (barrierLock) {
+            // Marquer ce processus comme étant à la barrière
+            atBarrier = true;
+            processesAtBarrier++;
+            int currentGeneration = barrierGeneration;
+            int totalProcesses = processes.size();
+
+            System.out.println("Processus " + processId + " attend (" + processesAtBarrier + "/" + totalProcesses + " processus à la barrière)");
+
+            if (processesAtBarrier == totalProcesses) {
+                // Tous les processus sont arrivés - débloquer tout le monde
+                System.out.println(">>> BARRIÈRE ATTEINTE : Tous les processus (" + totalProcesses + ") sont arrivés, déblocage général !");
+
+                // Préparer la prochaine génération de barrière
+                processesAtBarrier = 0;
+                barrierGeneration++;
+
+                // Réveiller tous les processus en attente
+                barrierLock.notifyAll();
+            } else {
+                // Attendre que tous les autres arrivent
+                while (processesAtBarrier > 0 && currentGeneration == barrierGeneration) {
+                    try {
+                        barrierLock.wait();
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                        atBarrier = false;
+                        return;
+                    }
+                }
+            }
+
+            atBarrier = false;
+        }
+
+        System.out.println("Processus " + processId + " repart de la barrière de synchronisation");
+    }
+
+    /**
+     * Vérifie si ce processus est actuellement à la barrière.
+     *
+     * @return true si le processus est à la barrière, false sinon
+     */
+    public boolean isAtBarrier() {
+        return atBarrier;
+    }
+
+    /**
+     * Obtient le nombre de processus actuellement à la barrière.
+     *
+     * @return Le nombre de processus à la barrière
+     */
+    public static int getProcessesAtBarrier() {
+        synchronized (barrierLock) {
+            return processesAtBarrier;
+        }
+    }
 
     /**
      * Arrête le communicateur et nettoie les ressources.
