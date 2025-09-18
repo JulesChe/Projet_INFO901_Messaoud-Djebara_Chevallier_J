@@ -64,10 +64,10 @@ public class App {
     }
 
     /**
-     * Lance une démonstration complète de toutes les fonctionnalités.
+     * Lance une démonstration de la communication asynchrone.
      */
     private static void runCompleteDemo() {
-        System.out.println("=== DÉMONSTRATION COMPLÈTE DU MIDDLEWARE ===\n");
+        System.out.println("=== DÉMONSTRATION DU MIDDLEWARE ===\n");
 
         // Test de communication asynchrone
         System.out.println("1. Test de communication asynchrone:");
@@ -76,22 +76,8 @@ public class App {
         // Pause entre les tests
         try { Thread.sleep(2000); } catch (InterruptedException e) {}
 
-        // Test de section critique
-        System.out.println("\n2. Test de section critique distribuée:");
-        testCriticalSection();
-
-        // Pause entre les tests
-        try { Thread.sleep(2000); } catch (InterruptedException e) {}
-
-        // Test de synchronisation
-        System.out.println("\n3. Test de synchronisation:");
-        testSynchronization();
-
-        // Pause entre les tests
-        try { Thread.sleep(2000); } catch (InterruptedException e) {}
-
         // Jeu de dés
-        System.out.println("\n4. Jeu de dés distribué:");
+        System.out.println("\n2. Jeu de dés distribué:");
         DiceGame.main(new String[]{});
 
         System.out.println("\n=== DÉMONSTRATION TERMINÉE ===");
@@ -132,10 +118,6 @@ public class App {
 
         } catch (InterruptedException e) {
             e.printStackTrace();
-        } finally {
-            com1.shutdown();
-            com2.shutdown();
-            com3.shutdown();
         }
     }
 
