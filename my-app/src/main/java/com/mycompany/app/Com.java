@@ -17,7 +17,10 @@ import java.util.concurrent.atomic.AtomicInteger;
  */
 public class Com {
 
-    private static final Map<Integer, Com> processes = new ConcurrentHashMap<>();
+    // Liste locale des processus connus (pas de variable de classe)
+    private final Map<Integer, Integer> knownProcesses = new ConcurrentHashMap<>(); // ID -> successeur dans l'anneau
+    private volatile int mySuccessor = -1; // Mon successeur dans l'anneau virtuel
+    private volatile int myPredecessor = -1; // Mon prédécesseur dans l'anneau virtuel
 
     private final int processId;
     private final Semaphore clockSemaphore;
@@ -25,17 +28,18 @@ public class Com {
 
     public final Mailbox mailbox;
 
-    // Section critique - gestion du jeton
+    // Section critique - gestion du jeton (sans gestionnaire central)
     private volatile boolean hasToken;
     private volatile boolean wantsToEnterCS;
     private final Object tokenLock = new Object();
     private final Semaphore csAccess = new Semaphore(0);
 
-    // Barrière de synchronisation
-    private static volatile int processesAtBarrier = 0;
-    private static volatile int barrierGeneration = 0;
-    private static final Object barrierLock = new Object();
+    // Barrière de synchronisation distribuée (sans variables statiques)
+    private volatile int barrierGeneration = 0;
+    private final Set<Integer> processesArrivedAtBarrier = ConcurrentHashMap.newKeySet();
+    private final CountDownLatch barrierLatch = new CountDownLatch(1);
     private volatile boolean atBarrier = false;
+    private volatile int expectedProcessesForBarrier = 0;
 
     // Communication synchrone
     private final Map<String, CountDownLatch> pendingSyncOperations = new ConcurrentHashMap<>();
@@ -70,10 +74,14 @@ public class Com {
         this.hasToken = false;
         this.wantsToEnterCS = false;
 
-        processes.put(processId, this);
+        // S'annoncer aux autres processus via découverte distribuée
+        discoverProcesses();
 
-        // Enregistrer ce processus auprès du gestionnaire de jeton
-        TokenManager.getInstance().registerProcess(processId, this);
+        // Initialiser le jeton si on est le premier processus (ID=0)
+        if (processId == 0) {
+            hasToken = true;
+            System.out.println("Processus " + processId + " initialise le jeton");
+        }
 
         // Démarrer le système de heartbeat
         startHeartbeat();
