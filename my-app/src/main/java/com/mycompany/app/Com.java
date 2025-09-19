@@ -132,7 +132,7 @@ public class Com {
     public void onUserMessage(UserMessage message) {
         if (message.getSender() != processId) {
             updateClock(message.getTimestamp());
-            mailbox.deposit(message);
+            mailbox.putMessage(message);
 
             // Envoyer ACK si c'est un message synchrone
             if (message.getSyncId() != null) {

@@ -202,7 +202,7 @@ public class DistributedEventBus {
     }
 
     public ProcessEndpoint getLocalEndpoint() {
-        return new ProcessEndpoint(config.getProcessId(), config.getHostname(), config.getBasePort());
+        return new ProcessEndpoint(config.getProcessId(), config.getBindAddress(), config.getBasePort());
     }
 
     public void shutdown() {
