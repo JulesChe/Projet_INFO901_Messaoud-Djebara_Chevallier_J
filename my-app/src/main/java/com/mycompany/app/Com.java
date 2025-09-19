@@ -86,6 +86,10 @@ public class Com {
 
     // ================ HORLOGE DE LAMPORT ================
 
+    /**
+     * Incrémente l'horloge logique de Lamport.
+     * Cette méthode est thread-safe.
+     */
     public void inc_clock() {
         try {
             clockSemaphore.acquire();
@@ -108,18 +112,36 @@ public class Com {
         }
     }
 
+    /**
+     * Retourne la valeur actuelle de l'horloge logique de Lamport.
+     *
+     * @return la valeur actuelle de l'horloge
+     */
     public int getCurrentClock() {
         return lamportClock;
     }
 
     // ================ COMMUNICATION ASYNCHRONE ================
 
+    /**
+     * Diffuse un message à tous les processus connectés (communication asynchrone).
+     * Incrémente automatiquement l'horloge logique.
+     *
+     * @param o l'objet à diffuser
+     */
     public void broadcast(Object o) {
         inc_clock();
         UserMessage message = new UserMessage(o, getCurrentClock(), processId);
         eventBus.post(message);
     }
 
+    /**
+     * Envoie un message à un processus spécifique (communication asynchrone).
+     * Incrémente automatiquement l'horloge logique.
+     *
+     * @param o l'objet à envoyer
+     * @param dest l'ID du processus destinataire
+     */
     public void sendTo(Object o, int dest) {
         inc_clock();
         UserMessage message = new UserMessage(o, getCurrentClock(), processId);
@@ -191,6 +213,11 @@ public class Com {
 
     // ================ SECTION CRITIQUE AVEC TOKEN INTÉGRÉ ================
 
+    /**
+     * Demande l'accès à la section critique distribuée.
+     * Bloque jusqu'à l'obtention du token.
+     * Utilise l'algorithme du token circulant.
+     */
     public void requestSC() {
         synchronized (tokenLock) {
             wantsToEnterCS = true;
@@ -207,6 +234,10 @@ public class Com {
         }
     }
 
+    /**
+     * Libère la section critique et passe le token au processus suivant.
+     * Doit être appelé après requestSC() quand le travail en section critique est terminé.
+     */
     public void releaseSC() {
         synchronized (tokenLock) {
             wantsToEnterCS = false;
@@ -291,6 +322,10 @@ public class Com {
 
     // ================ BARRIÈRE SIMPLIFIÉE ================
 
+    /**
+     * Synchronise ce processus avec les autres à une barrière.
+     * Bloque jusqu'à ce que tous les processus actifs arrivent à la barrière.
+     */
     public void synchronize() {
         atBarrier = true;
         barrierLatch = new CountDownLatch(1);
@@ -326,6 +361,14 @@ public class Com {
 
     // ================ COMMUNICATION SYNCHRONE ================
 
+    /**
+     * Communication synchrone par diffusion.
+     * Si processId == from : diffuse le message et attend les ACKs de tous.
+     * Si processId != from : attend le message de 'from'.
+     *
+     * @param o l'objet à diffuser (ignoré si récepteur)
+     * @param from l'ID du processus émetteur
+     */
     public void broadcastSync(Object o, int from) {
         if (processId == from) {
             // Expéditeur - envoie et attend ACKs de tous
@@ -369,6 +412,13 @@ public class Com {
         }
     }
 
+    /**
+     * Envoie un message synchrone à un processus spécifique.
+     * Bloque jusqu'à réception de l'ACK du destinataire.
+     *
+     * @param o l'objet à envoyer
+     * @param dest l'ID du processus destinataire
+     */
     public void sendToSync(Object o, int dest) {
         inc_clock();
         String syncId = processId + "-" + syncIdCounter.getAndIncrement();
@@ -390,6 +440,13 @@ public class Com {
         }
     }
 
+    /**
+     * Reçoit un message synchrone d'un processus spécifique.
+     * Bloque jusqu'à réception du message de 'from'.
+     *
+     * @param from l'ID du processus émetteur
+     * @return l'objet reçu ou null en cas d'erreur
+     */
     public Object recevFromSync(int from) {
         String syncKey = "recv-from-" + from;
         CountDownLatch latch = new CountDownLatch(1);
@@ -420,6 +477,11 @@ public class Com {
 
     public int getProcessId() { return processId; }
 
+    /**
+     * Retourne le nombre de processus actuellement connus.
+     *
+     * @return le nombre de processus découverts
+     */
     public int getProcessCount() {
         return eventBus.getKnownEndpoints().size();
     }
@@ -484,6 +546,10 @@ public class Com {
         }
     }
 
+    /**
+     * Arrête proprement le communicateur et libère toutes les ressources.
+     * Termine les threads, ferme les connexions réseau.
+     */
     public void shutdown() {
         running = false;
         tokenThreadRunning = false;
