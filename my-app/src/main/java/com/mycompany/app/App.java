@@ -269,14 +269,13 @@ public class App {
     }
 
     /**
-     * Test de section critique distribuée.
+     * Test de section critique (ancienne version).
      */
     private static void testCriticalSection() {
         Com com1 = new Com();
         Com com2 = new Com();
 
-        // Démarrer le gestionnaire de jeton
-        TokenManager.getInstance().start();
+        // Plus de TokenManager singleton - le token est géré par DistributedTokenService
 
         Thread t1 = new Thread(() -> {
             try {
@@ -316,7 +315,7 @@ public class App {
         } finally {
             com1.shutdown();
             com2.shutdown();
-            TokenManager.getInstance().stop();
+            // Plus de TokenManager - arrêt via shutdown() de chaque Com
         }
     }
 
