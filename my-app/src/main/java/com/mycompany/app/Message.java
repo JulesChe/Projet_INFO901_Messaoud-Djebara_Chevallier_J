@@ -1,13 +1,18 @@
 package com.mycompany.app;
 
+import java.io.Serializable;
+
 /**
  * Classe abstraite représentant un message générique dans le middleware.
  * Tous les messages échangés dans le système héritent de cette classe.
+ * Sérialisable pour permettre l'envoi sur le réseau.
  *
  * @author Middleware Team
  */
-public abstract class Message {
-    protected Object payload;
+public abstract class Message implements Serializable {
+    private static final long serialVersionUID = 1L;
+
+    protected Serializable payload;
     protected int timestamp;
     protected int sender;
     protected boolean isSystemMessage;
@@ -15,11 +20,11 @@ public abstract class Message {
     /**
      * Constructeur pour un message utilisateur.
      *
-     * @param payload Le contenu du message
+     * @param payload Le contenu du message (doit être sérialisable)
      * @param timestamp L'estampille temporelle (horloge de Lamport)
      * @param sender L'identifiant du processus expéditeur
      */
-    public Message(Object payload, int timestamp, int sender) {
+    public Message(Serializable payload, int timestamp, int sender) {
         this.payload = payload;
         this.timestamp = timestamp;
         this.sender = sender;
@@ -29,12 +34,12 @@ public abstract class Message {
     /**
      * Constructeur pour un message système ou utilisateur.
      *
-     * @param payload Le contenu du message
+     * @param payload Le contenu du message (doit être sérialisable)
      * @param timestamp L'estampille temporelle (horloge de Lamport)
      * @param sender L'identifiant du processus expéditeur
      * @param isSystemMessage true si c'est un message système, false sinon
      */
-    public Message(Object payload, int timestamp, int sender, boolean isSystemMessage) {
+    public Message(Serializable payload, int timestamp, int sender, boolean isSystemMessage) {
         this.payload = payload;
         this.timestamp = timestamp;
         this.sender = sender;
@@ -44,7 +49,7 @@ public abstract class Message {
     /**
      * @return Le contenu du message
      */
-    public Object getPayload() {
+    public Serializable getPayload() {
         return payload;
     }
 
