@@ -1,12 +1,17 @@
 package com.mycompany.app;
 
+import java.io.Serializable;
+
 /**
  * Classe abstraite représentant un message générique dans le middleware.
  * Tous les messages échangés dans le système héritent de cette classe.
  *
+ * Tous les messages sont désormais sérialisables pour la communication réseau.
+ *
  * @author Middleware Team
  */
-public abstract class Message {
+public abstract class Message implements Serializable {
+    private static final long serialVersionUID = 1L;
     protected Object payload;
     protected int timestamp;
     protected int sender;

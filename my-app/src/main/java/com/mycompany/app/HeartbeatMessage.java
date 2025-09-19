@@ -8,6 +8,7 @@ package com.mycompany.app;
  * @author Middleware Team
  */
 public class HeartbeatMessage extends Message {
+    private static final long serialVersionUID = 1L;
 
     public enum Type {
         HEARTBEAT,           // Message de vie périodique

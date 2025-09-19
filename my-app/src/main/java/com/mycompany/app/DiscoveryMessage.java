@@ -10,6 +10,7 @@ import java.util.Set;
  * @author Middleware Team
  */
 public class DiscoveryMessage extends Message {
+    private static final long serialVersionUID = 1L;
 
     public enum Type {
         ANNOUNCE,           // Annonce de présence d'un nouveau processus

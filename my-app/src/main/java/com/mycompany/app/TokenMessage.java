@@ -7,6 +7,7 @@ package com.mycompany.app;
  * @author Middleware Team
  */
 public class TokenMessage extends Message {
+    private static final long serialVersionUID = 1L;
 
     /**
      * Constructeur pour un message de jeton.

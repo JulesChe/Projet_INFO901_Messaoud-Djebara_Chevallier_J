@@ -11,30 +11,27 @@ public class App {
      * Point d'entrée de l'application.
      *
      * @param args Arguments de ligne de commande :
-     *             - "process" : Lance l'exemple avec des processus originaux
-     *             - "sync" : Lance les tests de communication synchrone
-     *             - "heartbeat" : Lance le test de heartbeat et renumération
      *             - "distributed" : Lance les tests de la version distribuée
+     *             - "multi" : Lance plusieurs processus distribués
+     *             - "single" : Lance un seul processus
      *             - "demo" : Lance une démonstration complète (par défaut)
      */
     public static void main(String[] args) {
         String mode = args.length > 0 ? args[0] : "demo";
 
         System.out.println("=== MIDDLEWARE DE COMMUNICATION DISTRIBUÉE ===");
+        System.out.println("Architecture 100% distribuée avec EventBus");
         System.out.println("Mode: " + mode + "\n");
 
         switch (mode.toLowerCase()) {
-            case "process":
-                runProcessExample();
-                break;
-            case "sync":
-                runSyncCommunicationTest();
-                break;
-            case "heartbeat":
-                runHeartbeatTest();
-                break;
             case "distributed":
                 runDistributedTest();
+                break;
+            case "multi":
+                runMultiProcessTest();
+                break;
+            case "single":
+                runSingleProcessTest();
                 break;
             case "demo":
             default:
@@ -44,67 +41,197 @@ public class App {
     }
 
     /**
-     * Lance l'exemple original avec les processus P0, P1, P2.
+     * Lance un seul processus distribué pour test.
      */
-    private static void runProcessExample() {
-        System.out.println("Lancement de l'exemple de processus original...\n");
+    private static void runSingleProcessTest() {
+        System.out.println("Lancement d'un processus distribué...\n");
 
-        Process p0 = new Process("P0");
-        Process p1 = new Process("P1");
-        Process p2 = new Process("P2");
-
-        // Démarrer le TokenManager
-        TokenManager.getInstance().start();
+        // Créer un processus avec configuration réseau
+        NetworkConfig config = new NetworkConfig(0); // Processus ID 0
+        Com process = new Com(config);
 
         try {
-            Thread.sleep(10000);
+            System.out.println("Processus " + process.getProcessId() + " démarré");
+            System.out.println("Test de fonctionnalités locales...");
 
-            p0.stop();
-            p1.stop();
-            p2.stop();
+            // Test de l'horloge de Lamport
+            process.inc_clock();
+            System.out.println("Horloge incrémentée");
 
-            p0.waitStopped();
-            p1.waitStopped();
-            p2.waitStopped();
+            // Test de broadcast (sera reçu par d'autres processus s'ils existent)
+            process.broadcast("Message de test depuis processus " + process.getProcessId());
+
+            Thread.sleep(10000); // Attendre 10 secondes
 
         } catch (InterruptedException e) {
             e.printStackTrace();
         } finally {
-            TokenManager.getInstance().stop();
+            process.shutdown();
         }
 
-        System.out.println("Exemple de processus terminé.");
+        System.out.println("Test processus unique terminé.");
     }
 
     /**
-     * Lance une démonstration de la communication asynchrone.
+     * Test de section critique distribuée.
+     */
+    private static void testDistributedCriticalSection() {
+        Com com1 = new Com(new NetworkConfig(30, "localhost", 5030, "230.0.0.1", 4446));
+        Com com2 = new Com(new NetworkConfig(31, "localhost", 5031, "230.0.0.1", 4446));
+
+        try {
+            // Attendre la découverte et l'initialisation du token distribué
+            Thread.sleep(5000);
+
+            Thread t1 = new Thread(() -> {
+                try {
+                    System.out.println("Processus " + com1.getProcessId() + " demande SC distribué");
+                    com1.requestSC();
+                    System.out.println("Processus " + com1.getProcessId() + " DANS SC distribué");
+                    Thread.sleep(2000);
+                    System.out.println("Processus " + com1.getProcessId() + " libère SC distribué");
+                    com1.releaseSC();
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
+            });
+
+            Thread t2 = new Thread(() -> {
+                try {
+                    Thread.sleep(500);
+                    System.out.println("Processus " + com2.getProcessId() + " demande SC distribué");
+                    com2.requestSC();
+                    System.out.println("Processus " + com2.getProcessId() + " DANS SC distribué");
+                    Thread.sleep(2000);
+                    System.out.println("Processus " + com2.getProcessId() + " libère SC distribué");
+                    com2.releaseSC();
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
+            });
+
+            t1.start();
+            t2.start();
+
+            t1.join();
+            t2.join();
+
+        } catch (InterruptedException e) {
+            e.printStackTrace();
+        } finally {
+            com1.shutdown();
+            com2.shutdown();
+        }
+    }
+
+    /**
+     * Test de synchronisation distribuée via barrière.
+     */
+    private static void testDistributedSynchronization() {
+        Com com1 = new Com(new NetworkConfig(40, "localhost", 5040, "230.0.0.1", 4446));
+        Com com2 = new Com(new NetworkConfig(41, "localhost", 5041, "230.0.0.1", 4446));
+
+        try {
+            // Attendre la découverte
+            Thread.sleep(5000);
+
+            Thread t1 = new Thread(() -> {
+                try {
+                    System.out.println("Processus " + com1.getProcessId() + " arrive à la barrière distribuée");
+                    com1.synchronize();
+                    System.out.println("Processus " + com1.getProcessId() + " repart de la barrière distribuée");
+                } catch (Exception e) {
+                    e.printStackTrace();
+                }
+            });
+
+            Thread t2 = new Thread(() -> {
+                try {
+                    Thread.sleep(3000); // Décalage pour tester l'attente
+                    System.out.println("Processus " + com2.getProcessId() + " arrive à la barrière distribuée");
+                    com2.synchronize();
+                    System.out.println("Processus " + com2.getProcessId() + " repart de la barrière distribuée");
+                } catch (Exception e) {
+                    e.printStackTrace();
+                }
+            });
+
+            t1.start();
+            t2.start();
+
+            t1.join();
+            t2.join();
+
+        } catch (InterruptedException e) {
+            e.printStackTrace();
+        } finally {
+            com1.shutdown();
+            com2.shutdown();
+        }
+    }
+
+    /**
+     * Lance une démonstration complète de l'architecture distribuée.
      */
     private static void runCompleteDemo() {
-        System.out.println("=== DÉMONSTRATION DU MIDDLEWARE ===\n");
+        System.out.println("=== DÉMONSTRATION MIDDLEWARE DISTRIBUÉ ===\n");
 
-        // Test de communication asynchrone
-        System.out.println("1. Test de communication asynchrone:");
-        testAsyncCommunication();
+        // Test de communication asynchrone distribuée
+        System.out.println("1. Test de communication asynchrone distribuée:");
+        testDistributedAsyncCommunication();
 
         // Pause entre les tests
-        try { Thread.sleep(2000); } catch (InterruptedException e) {}
+        try { Thread.sleep(3000); } catch (InterruptedException e) {}
 
         // Test de section critique distribuée
-        System.out.println("\n2. Test de section critique distribuée avec jeton circulaire:");
-        testCriticalSection();
+        System.out.println("\n2. Test de section critique distribuée avec token réseau:");
+        testDistributedCriticalSection();
 
         // Pause entre les tests
-        try { Thread.sleep(2000); } catch (InterruptedException e) {}
+        try { Thread.sleep(3000); } catch (InterruptedException e) {}
 
-        // Test de synchronisation
-        System.out.println("\n3. Test de barrière de synchronisation:");
-        testSynchronization();
+        // Test de synchronisation distribuée
+        System.out.println("\n3. Test de barrière de synchronisation distribuée:");
+        testDistributedSynchronization();
 
         System.out.println("\n=== DÉMONSTRATION TERMINÉE ===");
     }
 
     /**
-     * Test de communication asynchrone.
+     * Test de communication asynchrone distribuée.
+     */
+    private static void testDistributedAsyncCommunication() {
+        // Créer processus avec ports différents pour simulation réseau
+        Com com1 = new Com(new NetworkConfig(20, "localhost", 5020, "230.0.0.1", 4446));
+        Com com2 = new Com(new NetworkConfig(21, "localhost", 5021, "230.0.0.1", 4446));
+        Com com3 = new Com(new NetworkConfig(22, "localhost", 5022, "230.0.0.1", 4446));
+
+        System.out.println("Processus créés avec IDs: " + com1.getProcessId() + ", " +
+                          com2.getProcessId() + ", " + com3.getProcessId());
+
+        try {
+            // Attendre la découverte automatique
+            Thread.sleep(3000);
+
+            System.out.println("Envoi de messages via EventBus...");
+            com1.sendTo("Message réseau de " + com1.getProcessId() + " vers " + com2.getProcessId(), com2.getProcessId());
+            com1.broadcast("Broadcast réseau de " + com1.getProcessId());
+
+            Thread.sleep(2000);
+
+            System.out.println("Communication distribuée testée !");
+
+        } catch (InterruptedException e) {
+            e.printStackTrace();
+        } finally {
+            com1.shutdown();
+            com2.shutdown();
+            com3.shutdown();
+        }
+    }
+
+    /**
+     * Test de l'ancienne communication asynchrone (pour comparaison).
      */
     private static void testAsyncCommunication() {
         Com com1 = new Com();

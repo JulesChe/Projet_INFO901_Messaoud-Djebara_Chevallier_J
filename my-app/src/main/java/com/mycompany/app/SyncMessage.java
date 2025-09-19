@@ -7,6 +7,7 @@ package com.mycompany.app;
  * @author Middleware Team
  */
 public class SyncMessage extends Message {
+    private static final long serialVersionUID = 1L;
 
     public enum Type {
         BROADCAST_SYNC,

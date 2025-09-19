@@ -10,6 +10,7 @@ import java.util.Set;
  * @author Middleware Team
  */
 public class BarrierMessage extends Message {
+    private static final long serialVersionUID = 1L;
 
     public enum Type {
         ARRIVE_AT_BARRIER,      // Un processus arrive à la barrière

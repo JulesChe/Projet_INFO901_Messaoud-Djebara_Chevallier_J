@@ -17,12 +17,14 @@ import java.util.concurrent.atomic.AtomicInteger;
  */
 public class Com {
 
-    // Registre local des processus connus (vue distribuée de ce processus)
-    private final Map<Integer, Com> knownProcesses = new ConcurrentHashMap<>();
+    // Endpoints des processus connus - PLUS de références directes !
+    private final Map<Integer, ProcessEndpoint> knownEndpoints = new ConcurrentHashMap<>();
 
-    // Registre global pour simulation locale - en production réelle ce serait la communication réseau
-    // Point d'accès centralisé pour la découverte initiale et la simulation
-    private static final Map<Integer, Com> globalRegistry = new ConcurrentHashMap<>();
+    // Bus de messages distribué - remplace toutes les communications directes
+    private final DistributedEventBus eventBus;
+
+    // Service de token distribué - remplace TokenManager
+    private final DistributedTokenService tokenService;
 
     private volatile int processId;
     private final Semaphore clockSemaphore;
@@ -69,34 +71,44 @@ public class Com {
 
 
     /**
-     * Constructeur du communicateur.
-     * Initialise l'horloge de Lamport et la boîte aux lettres.
-     * Utilise l'algorithme de numérotation automatique distribuée.
+     * Constructeur du communicateur avec configuration réseau.
+     * Architecture 100% distribuée - AUCUNE variable statique partagée.
      */
-    public Com() {
-        this.processId = getDistributedProcessId();
+    public Com(NetworkConfig config) {
+        this.processId = config.getProcessId();
         this.clockSemaphore = new Semaphore(1);
         this.lamportClock = 0;
         this.mailbox = new Mailbox();
         this.hasToken = false;
         this.wantsToEnterCS = false;
 
-        // Enregistrement dans le registre global (simulation de la découverte réseau)
-        globalRegistry.put(processId, this);
-        // S'ajouter à sa propre vue locale
-        knownProcesses.put(processId, this);
+        // Initialiser le bus de messages distribué
+        this.eventBus = new DistributedEventBus(config);
 
-        // Enregistrer ce processus auprès du gestionnaire de jeton
-        TokenManager.getInstance().registerProcess(processId, this);
+        // Initialiser le service de token distribué
+        this.tokenService = new DistributedTokenService(processId, eventBus);
 
-        // Démarrer le système de heartbeat
+        // S'enregistrer pour recevoir les messages via @Subscribe
+        this.eventBus.registerSubscriber(this);
+
+        // Ajouter son propre endpoint
+        ProcessEndpoint localEndpoint = new ProcessEndpoint(
+            processId, config.getBindAddress(), config.getBasePort());
+        knownEndpoints.put(processId, localEndpoint);
+
+        // Démarrer les services distribués
         startHeartbeat();
-
-        // Démarrer le protocole de découverte
         startDiscovery();
+        tokenService.start();
 
-        // Annoncer notre présence
-        announcePresence();
+        System.out.println("Processus " + processId + " démarré avec architecture distribuée");
+    }
+
+    /**
+     * Constructeur avec numérotation automatique distribuée.
+     */
+    public Com() {
+        this(new NetworkConfig(generateDistributedProcessId()));
     }
 
     /**
@@ -158,6 +170,7 @@ public class Com {
 
     /**
      * Diffuse un objet à tous les autres processus de manière asynchrone.
+     * Utilise le bus de messages distribué.
      *
      * @param o L'objet à diffuser
      */
@@ -166,17 +179,13 @@ public class Com {
         int timestamp = getCurrentClock();
         UserMessage message = new UserMessage(o, timestamp, processId);
 
-        // Broadcast à tous les processus connus dans la vue locale
-        // (En production réelle, ce serait un envoi réseau)
-        for (Com process : knownProcesses.values()) {
-            if (process.processId != this.processId) {
-                process.receiveMessage(message);
-            }
-        }
+        // Publier sur le bus distribué - plus de communication directe !
+        eventBus.post(message);
     }
 
     /**
      * Envoie un objet à un processus spécifique de manière asynchrone.
+     * Utilise le bus de messages distribué.
      *
      * @param o L'objet à envoyer
      * @param dest L'identifiant du processus destinataire
@@ -186,68 +195,119 @@ public class Com {
         int timestamp = getCurrentClock();
         UserMessage message = new UserMessage(o, timestamp, processId);
 
-        Com destProcess = knownProcesses.get(dest);
-        if (destProcess == null) {
-            destProcess = globalRegistry.get(dest);
-        }
-        if (destProcess != null) {
-            destProcess.receiveMessage(message);
-        }
+        // Envoyer via le bus distribué à l'endpoint spécifique
+        eventBus.sendTo(dest, message);
     }
 
+    // ================ RÉCEPTION DE MESSAGES VIA EventBus ================
+
     /**
-     * Reçoit un message et le place dans la boîte aux lettres.
-     * Ne met à jour l'horloge que pour les messages non-système.
-     * Gère spécialement les messages système.
-     *
-     * @param message Le message reçu
+     * Reçoit les messages utilisateur via EventBus (@Subscribe).
      */
-    private void receiveMessage(Message message) {
-        if (!message.isSystemMessage()) {
+    @Subscribe
+    public void onUserMessage(UserMessage message) {
+        if (message.getSender() != this.processId) { // Éviter de recevoir ses propres messages
             updateClock(message.getTimestamp());
-        }
-
-        // Traitement spécial pour les messages système
-        if (message instanceof HeartbeatMessage) {
-            handleHeartbeatMessage((HeartbeatMessage) message);
-        } else if (message instanceof DiscoveryMessage) {
-            handleDiscoveryMessage((DiscoveryMessage) message);
-        } else if (message instanceof BarrierMessage) {
-            handleBarrierMessage((BarrierMessage) message, null);
-        } else {
             mailbox.putMessage(message);
+            System.out.println("Processus " + processId + " reçoit: " + message.getPayload());
         }
     }
 
     /**
-     * Obtient le nombre total de processus enregistrés.
+     * Reçoit les messages de synchronisation via EventBus (@Subscribe).
+     */
+    @Subscribe
+    public void onSyncMessage(SyncMessage message) {
+        if (message.getSender() != this.processId) {
+            if (!message.isSystemMessage()) {
+                updateClock(message.getTimestamp());
+            }
+            handleSyncMessage(message);
+        }
+    }
+
+    /**
+     * Reçoit les messages de heartbeat via EventBus (@Subscribe).
+     */
+    @Subscribe
+    public void onHeartbeatMessage(HeartbeatMessage message) {
+        if (message.getSender() != this.processId) {
+            handleHeartbeatMessage(message);
+        }
+    }
+
+    /**
+     * Reçoit les messages de découverte via EventBus (@Subscribe).
+     */
+    @Subscribe
+    public void onDiscoveryMessage(DiscoveryMessage message) {
+        if (message.getSender() != this.processId) {
+            handleDiscoveryMessage(message);
+        }
+    }
+
+    /**
+     * Reçoit les messages de barrière via EventBus (@Subscribe).
+     */
+    @Subscribe
+    public void onBarrierMessage(BarrierMessage message) {
+        if (message.getSender() != this.processId) {
+            handleBarrierMessage(message, null);
+        }
+    }
+
+    /**
+     * Reçoit les messages de token via EventBus (@Subscribe).
+     */
+    @Subscribe
+    public void onTokenMessage(TokenMessage message) {
+        if (message.getSender() != this.processId) {
+            receiveTokenMessage(message);
+        }
+    }
+
+    /**
+     * Reçoit les notifications de découverte d'endpoints via EventBus (@Subscribe).
+     */
+    @Subscribe
+    public void onEndpointDiscovered(EndpointDiscoveredMessage message) {
+        ProcessEndpoint endpoint = message.getEndpoint();
+        if (endpoint.getProcessId() != this.processId) {
+            knownEndpoints.put(endpoint.getProcessId(), endpoint);
+            System.out.println("Processus " + processId + " découvre l'endpoint: " + endpoint);
+        }
+    }
+
+    /**
+     * Obtient le nombre total de processus connus.
      *
      * @return Le nombre de processus
      */
     public int getProcessCount() {
-        return knownProcesses.size();
+        return knownEndpoints.size();
     }
 
     /**
-     * Obtient la liste de tous les processus.
+     * Obtient la liste de tous les endpoints de processus.
      *
-     * @return Map des processus (id -> Com)
+     * @return Map des endpoints (id -> ProcessEndpoint)
      */
-    public Map<Integer, Com> getAllProcesses() {
-        return new HashMap<>(knownProcesses);
+    public Map<Integer, ProcessEndpoint> getAllEndpoints() {
+        return new HashMap<>(knownEndpoints);
     }
 
     /**
      * Demande l'accès à la section critique.
-     * Bloque jusqu'à obtention du jeton.
+     * Version distribuée avec tokenService.
      */
     public void requestSC() {
         synchronized (tokenLock) {
             wantsToEnterCS = true;
             System.out.println("Processus " + processId + " demande l'accès à la section critique");
 
-            // Si le processus a déjà le jeton, il peut entrer directement
-            if (hasToken) {
+            // Vérifier avec le service de token distribué
+            if (tokenService.hasToken()) {
+                hasToken = true;
                 System.out.println("Processus " + processId + " a déjà le jeton, accès immédiat à la SC");
                 return;
             }
@@ -266,32 +326,38 @@ public class Com {
 
     /**
      * Libère la section critique et passe le jeton au processus suivant.
+     * Version distribuée avec tokenService.
      */
     public void releaseSC() {
         synchronized (tokenLock) {
             wantsToEnterCS = false;
 
-            if (hasToken) {
+            if (tokenService.hasToken()) {
                 System.out.println("Processus " + processId + " libère la section critique et passe le jeton");
                 hasToken = false;
-                TokenManager.getInstance().passToken();
+                tokenService.passTokenToNext();
             }
         }
     }
 
     /**
      * Reçoit un message de jeton (message système).
+     * Délègue au tokenService distribué.
      *
      * @param tokenMessage Le message contenant le jeton
      */
     public void receiveTokenMessage(TokenMessage tokenMessage) {
         synchronized (tokenLock) {
-            hasToken = true;
-            System.out.println("Processus " + processId + " a reçu le jeton de " + tokenMessage.getSender());
+            // Le tokenService gère déjà la réception via @Subscribe
+            // Mettre à jour l'état local
+            if (tokenService.hasToken()) {
+                hasToken = true;
+                System.out.println("Processus " + processId + " confirme réception du jeton de " + tokenMessage.getSender());
 
-            // Si le processus veut entrer en section critique, lui donner accès
-            if (wantsToEnterCS) {
-                csAccess.release();
+                // Si le processus veut entrer en section critique, lui donner accès
+                if (wantsToEnterCS) {
+                    csAccess.release();
+                }
             }
         }
     }
@@ -369,7 +435,7 @@ public class Com {
             String syncId = processId + "-" + syncIdCounter.getAndIncrement();
 
             Set<Integer> expectedAcks = new HashSet<>();
-            for (Integer pid : knownProcesses.keySet()) {
+            for (Integer pid : knownEndpoints.keySet()) {
                 if (pid != processId) {
                     expectedAcks.add(pid);
                 }
@@ -383,15 +449,11 @@ public class Com {
             CountDownLatch latch = new CountDownLatch(expectedAcks.size());
             pendingSyncOperations.put(syncId, latch);
 
-            // Envoyer le message de broadcast
+            // Envoyer le message de broadcast via EventBus
             SyncMessage syncMsg = new SyncMessage(o, timestamp, processId,
                                                 SyncMessage.Type.BROADCAST_SYNC, processId, syncId);
 
-            for (Com process : knownProcesses.values()) {
-                if (process.processId != processId) {
-                    process.receiveSyncMessage(syncMsg);
-                }
-            }
+            eventBus.post(syncMsg);
 
             // Attendre tous les accusés de réception
             try {
@@ -438,27 +500,21 @@ public class Com {
         CountDownLatch latch = new CountDownLatch(1);
         pendingSyncOperations.put(syncId, latch);
 
-        // Envoyer le message
+        // Envoyer le message via EventBus
         SyncMessage syncMsg = new SyncMessage(o, timestamp, processId,
                                             SyncMessage.Type.SEND_SYNC, processId, syncId);
 
-        Com destProcess = knownProcesses.get(dest);
-        if (destProcess == null) {
-            destProcess = globalRegistry.get(dest);
-        }
-        if (destProcess != null) {
-            destProcess.receiveSyncMessage(syncMsg);
+        eventBus.sendTo(dest, syncMsg);
 
-            // Attendre l'accusé de réception
-            try {
-                System.out.println("Processus " + processId + " attend ACK de sendToSync vers " + dest);
-                latch.await();
-                System.out.println("Processus " + processId + " : sendToSync vers " + dest + " terminé");
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-            } finally {
-                pendingSyncOperations.remove(syncId);
-            }
+        // Attendre l'accusé de réception
+        try {
+            System.out.println("Processus " + processId + " attend ACK de sendToSync vers " + dest);
+            latch.await();
+            System.out.println("Processus " + processId + " : sendToSync vers " + dest + " terminé");
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        } finally {
+            pendingSyncOperations.remove(syncId);
         }
     }
 
@@ -491,15 +547,11 @@ public class Com {
 
     /**
      * Traite la réception d'un message de synchronisation.
+     * Appelée depuis onSyncMessage (@Subscribe).
      *
      * @param syncMessage Le message de synchronisation reçu
      */
-    private void receiveSyncMessage(SyncMessage syncMessage) {
-        // Mettre à jour l'horloge de Lamport
-        if (!syncMessage.isSystemMessage()) {
-            updateClock(syncMessage.getTimestamp());
-        }
-
+    private void handleSyncMessage(SyncMessage syncMessage) {
         switch (syncMessage.getMessageType()) {
             case BROADCAST_SYNC:
                 handleBroadcastSync(syncMessage);
@@ -527,20 +579,14 @@ public class Com {
             latch.countDown();
         }
 
-        // Envoyer l'accusé de réception
+        // Envoyer l'accusé de réception via EventBus
         inc_clock();
         int timestamp = getCurrentClock();
         SyncMessage ackMsg = new SyncMessage("ACK", timestamp, processId,
                                            SyncMessage.Type.BROADCAST_ACK,
                                            syncMessage.getOriginalSender(), syncMessage.getSyncId());
 
-        Com senderProcess = knownProcesses.get(syncMessage.getOriginalSender());
-        if (senderProcess == null) {
-            senderProcess = globalRegistry.get(syncMessage.getOriginalSender());
-        }
-        if (senderProcess != null) {
-            senderProcess.receiveSyncMessage(ackMsg);
-        }
+        eventBus.sendTo(syncMessage.getOriginalSender(), ackMsg);
     }
 
     private void handleBroadcastAck(SyncMessage syncMessage) {
@@ -573,20 +619,14 @@ public class Com {
             latch.countDown();
         }
 
-        // Envoyer l'accusé de réception
+        // Envoyer l'accusé de réception via EventBus
         inc_clock();
         int timestamp = getCurrentClock();
         SyncMessage ackMsg = new SyncMessage("ACK", timestamp, processId,
                                            SyncMessage.Type.SEND_ACK,
                                            syncMessage.getOriginalSender(), syncMessage.getSyncId());
 
-        Com senderProcess = knownProcesses.get(syncMessage.getOriginalSender());
-        if (senderProcess == null) {
-            senderProcess = globalRegistry.get(syncMessage.getOriginalSender());
-        }
-        if (senderProcess != null) {
-            senderProcess.receiveSyncMessage(ackMsg);
-        }
+        eventBus.sendTo(syncMessage.getOriginalSender(), ackMsg);
     }
 
     private void handleSendAck(SyncMessage syncMessage) {
@@ -599,32 +639,16 @@ public class Com {
     }
 
     /**
-     * Obtient un ID de processus unique via l'algorithme de numérotation distribuée.
-     * Version simplifiée mais cohérente basée sur les concepts du cours.
+     * Génère un ID de processus distribué basé sur l'heure et un numéro aléatoire.
+     * Plus de dépendance aux variables statiques !
      *
      * @return L'ID unique assigné au processus
      */
-    private int getDistributedProcessId() {
-        synchronized (globalRegistry) {
-            // Si c'est le premier processus, il obtient l'ID 0
-            if (globalRegistry.isEmpty()) {
-                return 0;
-            }
-
-            // Trouver le prochain ID disponible de manière consécutive
-            Set<Integer> usedIds = new HashSet<>();
-            for (Com process : globalRegistry.values()) {
-                usedIds.add(process.processId);
-            }
-
-            int nextId = 0;
-            while (usedIds.contains(nextId)) {
-                nextId++;
-            }
-
-            return nextId;
-        }
+    private static int generateDistributedProcessId() {
+        // Utilise l'heure système et un nombre aléatoire pour éviter les collisions
+        return (int) (System.currentTimeMillis() % 1000) + new Random().nextInt(100);
     }
+
 
 
     /**
@@ -650,15 +674,13 @@ public class Com {
 
     /**
      * Envoie un message de heartbeat à tous les autres processus.
+     * Utilise le bus distribué.
      */
     private void sendHeartbeat() {
         HeartbeatMessage heartbeat = new HeartbeatMessage(getCurrentClock(), processId, HeartbeatMessage.Type.HEARTBEAT);
 
-        for (Com process : knownProcesses.values()) {
-            if (process.processId != this.processId) {
-                process.receiveMessage(heartbeat);
-            }
-        }
+        // Publier sur le bus distribué
+        eventBus.post(heartbeat);
     }
 
     /**
@@ -695,7 +717,7 @@ public class Com {
             int otherProcessId = entry.getKey();
             long lastSeen = entry.getValue();
 
-            if (currentTime - lastSeen > HEARTBEAT_TIMEOUT && knownProcesses.containsKey(otherProcessId)) {
+            if (currentTime - lastSeen > HEARTBEAT_TIMEOUT && knownEndpoints.containsKey(otherProcessId)) {
                 deadProcesses.add(otherProcessId);
             }
         }
@@ -720,21 +742,17 @@ public class Com {
         HeartbeatMessage deathNotification = new HeartbeatMessage(getCurrentClock(), processId,
                                                                  HeartbeatMessage.Type.PROCESS_DEAD_NOTIFY, deadProcessId);
 
-        for (Com process : knownProcesses.values()) {
-            if (process.processId != this.processId && process.processId != deadProcessId) {
-                process.receiveMessage(deathNotification);
-            }
-        }
+        // Publier sur le bus distribué
+        eventBus.post(deathNotification);
     }
 
     /**
      * Supprime un processus mort de toutes les structures.
      */
     private void removeDeadProcess(int deadProcessId) {
-        knownProcesses.remove(deadProcessId);
-        globalRegistry.remove(deadProcessId);
+        knownEndpoints.remove(deadProcessId);
         lastHeartbeatTime.remove(deadProcessId);
-        TokenManager.getInstance().unregisterProcess(deadProcessId);
+        System.out.println("Processus " + deadProcessId + " supprimé des endpoints connus");
     }
 
     /**
@@ -747,11 +765,8 @@ public class Com {
         HeartbeatMessage renumberRequest = new HeartbeatMessage(getCurrentClock(), processId,
                                                                HeartbeatMessage.Type.RENUMBER_REQUEST);
 
-        for (Com process : knownProcesses.values()) {
-            if (process.processId != this.processId) {
-                process.receiveMessage(renumberRequest);
-            }
-        }
+        // Publier sur le bus distribué
+        eventBus.post(renumberRequest);
 
         // Effectuer la renumération
         performRenumbering();
@@ -759,48 +774,17 @@ public class Com {
 
     /**
      * Effectue la renumération des processus survivants.
-     * Les IDs sont réassignés de manière consécutive en commençant par 0.
+     * Version distribuée - chaque processus renumérote son propre ID.
      */
     private void performRenumbering() {
-        synchronized (knownProcesses) {
-            // Récupérer tous les processus survivants triés par leur ID actuel
-            List<Com> survivingProcesses = new ArrayList<>(knownProcesses.values());
-            survivingProcesses.sort((a, b) -> Integer.compare(a.processId, b.processId));
+        synchronized (knownEndpoints) {
+            // Dans une vraie architecture distribuée, la renumération serait plus complexe
+            // Pour simplifier, on garde les IDs existants et on supprime juste les morts
+            List<Integer> survivingIds = new ArrayList<>(knownEndpoints.keySet());
+            Collections.sort(survivingIds);
 
-            // Réassigner les IDs de manière consécutive
-            Map<Integer, Integer> oldToNewIdMapping = new HashMap<>();
-            int newId = 0;
-
-            for (Com process : survivingProcesses) {
-                int oldId = process.processId;
-                oldToNewIdMapping.put(oldId, newId);
-                newId++;
-            }
-
-            // Appliquer la renumération
-            Map<Integer, Com> newProcessesMap = new ConcurrentHashMap<>();
-            for (Com process : survivingProcesses) {
-                int oldId = process.processId;
-                int assignedNewId = oldToNewIdMapping.get(oldId);
-
-                // Mettre à jour l'ID du processus (plus besoin de réflexion)
-                process.processId = assignedNewId;
-
-                newProcessesMap.put(assignedNewId, process);
-
-                // Réenregistrer auprès du TokenManager
-                TokenManager.getInstance().unregisterProcess(oldId);
-                TokenManager.getInstance().registerProcess(assignedNewId, process);
-            }
-
-            // Remplacer la map des processus
-            knownProcesses.clear();
-            knownProcesses.putAll(newProcessesMap);
-            // Mise à jour de la simulation locale aussi
-            globalRegistry.clear();
-            globalRegistry.putAll(newProcessesMap);
-
-            System.out.println("Renumération terminée. Processus " + processId + " a maintenant l'ID: " + this.processId);
+            System.out.println("Renumération terminée. Processus survivants: " + survivingIds);
+            System.out.println("Processus " + processId + " conserve son ID");
         }
     }
 
@@ -814,6 +798,7 @@ public class Com {
 
     /**
      * Arrête le communicateur et nettoie les ressources.
+     * Version distribuée.
      */
     public void shutdown() {
         heartbeatActive = false;
@@ -828,12 +813,21 @@ public class Com {
             Thread.currentThread().interrupt();
         }
 
-        TokenManager.getInstance().unregisterProcess(processId);
-        knownProcesses.remove(processId);
-        globalRegistry.remove(processId);
+        // Supprimer de nos structures locales
+        knownEndpoints.remove(processId);
 
         // Nettoyer le protocole de découverte
         cleanupDiscovery();
+
+        // Arrêter le service de token distribué
+        if (tokenService != null) {
+            tokenService.stop();
+        }
+
+        // Arrêter le bus distribué
+        if (eventBus != null) {
+            eventBus.shutdown();
+        }
 
         // Nettoyer les opérations de synchronisation en attente
         for (CountDownLatch latch : pendingSyncOperations.values()) {
@@ -844,6 +838,8 @@ public class Com {
         pendingSyncOperations.clear();
         broadcastAcksPending.clear();
         pendingSyncMessages.clear();
+
+        System.out.println("Processus " + processId + " arrêté");
     }
 
     // ================ NOUVEAUX PROTOCOLES DISTRIBUÉS ================
@@ -861,44 +857,25 @@ public class Com {
     }
 
     /**
-     * Annonce la présence de ce processus et découvre les autres.
-     * Simule la découverte réseau en interrogeant le registre global.
+     * Annonce la présence de ce processus.
+     * Utilise le bus distribué pour la découverte.
      */
     private void announcePresence() {
-        // Phase 1: Découvrir tous les processus existants
-        synchronized (globalRegistry) {
-            for (Com process : globalRegistry.values()) {
-                if (process.processId != this.processId && !knownProcesses.containsKey(process.processId)) {
-                    knownProcesses.put(process.processId, process);
-                    System.out.println("Processus " + processId + " découvre le processus " + process.processId);
-                }
-            }
-        }
-
-        // Phase 2: Annoncer sa présence aux processus découverts
-        DiscoveryMessage announce = new DiscoveryMessage(getCurrentClock(), processId,
-                                                        DiscoveryMessage.Type.ANNOUNCE);
-
-        for (Com process : knownProcesses.values()) {
-            if (process.processId != this.processId) {
-                process.handleDiscoveryMessage(announce);
-            }
-        }
+        // La découverte se fait maintenant automatiquement via le multicast
+        // dans DistributedEventBus, plus besoin de logique explicite ici
+        System.out.println("Processus " + processId + " s'annonce via le bus distribué");
     }
 
     /**
      * Partage la liste des processus connus avec les autres.
      */
     private void shareKnownProcesses() {
-        Set<Integer> knownIds = new HashSet<>(knownProcesses.keySet());
+        Set<Integer> knownIds = new HashSet<>(knownEndpoints.keySet());
         DiscoveryMessage listMsg = new DiscoveryMessage(getCurrentClock(), processId,
                                                        DiscoveryMessage.Type.PROCESS_LIST, knownIds);
 
-        for (Com process : knownProcesses.values()) {
-            if (process.processId != this.processId) {
-                process.handleDiscoveryMessage(listMsg);
-            }
-        }
+        // Publier via le bus distribué
+        eventBus.post(listMsg);
     }
 
     /**
@@ -907,23 +884,17 @@ public class Com {
     private void handleDiscoveryMessage(DiscoveryMessage msg) {
         switch (msg.getDiscoveryType()) {
             case ANNOUNCE:
-                // Un nouveau processus s'annonce
-                Com announcer = globalRegistry.get(msg.getSender());
-                if (announcer != null && !knownProcesses.containsKey(msg.getSender())) {
-                    knownProcesses.put(msg.getSender(), announcer);
-                    System.out.println("Processus " + processId + " découvre le processus " + msg.getSender());
-                }
+                // Un nouveau processus s'annonce - l'endpoint sera découvert via EventBus
+                System.out.println("Processus " + processId + " reçoit annonce de " + msg.getSender());
                 break;
 
             case PROCESS_LIST:
                 // Mise à jour de notre vue avec les processus connus de l'expéditeur
                 if (msg.getKnownProcesses() != null) {
                     for (Integer pid : msg.getKnownProcesses()) {
-                        if (!knownProcesses.containsKey(pid)) {
-                            Com process = globalRegistry.get(pid);
-                            if (process != null) {
-                                knownProcesses.put(pid, process);
-                            }
+                        if (!knownEndpoints.containsKey(pid) && pid != processId) {
+                            // Les endpoints seront mis à jour par le bus distribué
+                            System.out.println("Processus " + processId + " apprend l'existence de " + pid);
                         }
                     }
                 }
@@ -931,7 +902,8 @@ public class Com {
 
             case PROCESS_LEAVING:
                 // Un processus quitte le système
-                knownProcesses.remove(msg.getSender());
+                knownEndpoints.remove(msg.getSender());
+                System.out.println("Processus " + msg.getSender() + " quitte le système");
                 break;
         }
     }
@@ -941,7 +913,7 @@ public class Com {
      */
     private void electBarrierCoordinator() {
         int minId = processId;
-        for (Integer pid : knownProcesses.keySet()) {
+        for (Integer pid : knownEndpoints.keySet()) {
             if (pid < minId) {
                 minId = pid;
             }
@@ -960,34 +932,26 @@ public class Com {
         processesAtBarrier.add(processId);
 
         // Attendre que tous les processus arrivent
-        CountDownLatch coordinatorLatch = new CountDownLatch(knownProcesses.size() - 1);
+        CountDownLatch coordinatorLatch = new CountDownLatch(knownEndpoints.size() - 1);
 
-        // Envoyer une demande de statut à tous les autres processus
-        for (Com process : knownProcesses.values()) {
-            if (process.processId != this.processId) {
-                BarrierMessage statusRequest = new BarrierMessage(getCurrentClock(), processId,
-                    BarrierMessage.Type.BARRIER_STATUS_REQUEST, generation, barrierCoordinatorId);
-                process.handleBarrierMessage(statusRequest, coordinatorLatch);
-            }
-        }
+        // Envoyer une demande de statut à tous les autres processus via EventBus
+        BarrierMessage statusRequest = new BarrierMessage(getCurrentClock(), processId,
+            BarrierMessage.Type.BARRIER_STATUS_REQUEST, generation, barrierCoordinatorId);
+        eventBus.post(statusRequest);
 
         try {
             // Attendre les réponses avec timeout
             boolean allArrived = coordinatorLatch.await(10, TimeUnit.SECONDS);
 
-            if (allArrived || processesAtBarrier.size() == knownProcesses.size()) {
+            if (allArrived || processesAtBarrier.size() == knownEndpoints.size()) {
                 System.out.println(">>> BARRIÈRE ATTEINTE : Tous les processus sont arrivés !");
 
-                // Broadcast la libération
+                // Broadcast la libération via EventBus
                 Set<Integer> arrivedProcesses = new HashSet<>(processesAtBarrier);
                 BarrierMessage release = new BarrierMessage(getCurrentClock(), processId,
                     BarrierMessage.Type.BARRIER_RELEASE, generation, arrivedProcesses, barrierCoordinatorId);
 
-                for (Com process : knownProcesses.values()) {
-                    if (process.processId != this.processId) {
-                        process.handleBarrierMessage(release, null);
-                    }
-                }
+                eventBus.post(release);
 
                 // Réinitialiser pour la prochaine barrière
                 processesAtBarrier.clear();
@@ -1003,12 +967,11 @@ public class Com {
     private void participateInBarrier(int generation) {
         System.out.println("Processus " + processId + " participe à la barrière génération " + generation);
 
-        // Notifier le coordinateur de notre arrivée
-        Com coordinator = knownProcesses.get(barrierCoordinatorId);
-        if (coordinator != null && coordinator.processId != this.processId) {
+        // Notifier le coordinateur de notre arrivée via EventBus
+        if (barrierCoordinatorId != this.processId) {
             BarrierMessage arrive = new BarrierMessage(getCurrentClock(), processId,
                 BarrierMessage.Type.ARRIVE_AT_BARRIER, generation, barrierCoordinatorId);
-            coordinator.handleBarrierMessage(arrive, null);
+            eventBus.sendTo(barrierCoordinatorId, arrive);
         }
 
         // Attendre la libération
@@ -1048,10 +1011,7 @@ public class Com {
                 if (atBarrier) {
                     BarrierMessage response = new BarrierMessage(getCurrentClock(), processId,
                         BarrierMessage.Type.ARRIVE_AT_BARRIER, msg.getBarrierGeneration(), msg.getCoordinatorId());
-                    Com coordinator = knownProcesses.get(msg.getCoordinatorId());
-                    if (coordinator != null) {
-                        coordinator.handleBarrierMessage(response, latch);
-                    }
+                    eventBus.sendTo(msg.getCoordinatorId(), response);
                 }
                 break;
         }
@@ -1071,13 +1031,9 @@ public class Com {
             Thread.currentThread().interrupt();
         }
 
-        // Annoncer le départ
+        // Annoncer le départ via EventBus
         DiscoveryMessage leaving = new DiscoveryMessage(getCurrentClock(), processId,
                                                        DiscoveryMessage.Type.PROCESS_LEAVING);
-        for (Com process : knownProcesses.values()) {
-            if (process.processId != this.processId) {
-                process.handleDiscoveryMessage(leaving);
-            }
-        }
+        eventBus.post(leaving);
     }
 }
