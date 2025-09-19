@@ -17,14 +17,14 @@ import java.util.concurrent.atomic.AtomicInteger;
  */
 public class Com {
 
-    // Registre local des processus connus (remplace la variable statique)
+    // Registre local des processus connus (vue distribuée de ce processus)
     private final Map<Integer, Com> knownProcesses = new ConcurrentHashMap<>();
 
-    // Registre temporaire global pour la simulation locale (sera supprimé en production réelle)
-    // En production, les processus communiqueraient via réseau
-    private static final Map<Integer, Com> localSimulation = new ConcurrentHashMap<>();
+    // Registre global pour simulation locale - en production réelle ce serait la communication réseau
+    // Point d'accès centralisé pour la découverte initiale et la simulation
+    private static final Map<Integer, Com> globalRegistry = new ConcurrentHashMap<>();
 
-    private final int processId;
+    private volatile int processId;
     private final Semaphore clockSemaphore;
     private volatile int lamportClock;
 
@@ -81,8 +81,9 @@ public class Com {
         this.hasToken = false;
         this.wantsToEnterCS = false;
 
-        // Enregistrement local pour simulation (en production, ce serait via réseau)
-        localSimulation.put(processId, this);
+        // Enregistrement dans le registre global (simulation de la découverte réseau)
+        globalRegistry.put(processId, this);
+        // S'ajouter à sa propre vue locale
         knownProcesses.put(processId, this);
 
         // Enregistrer ce processus auprès du gestionnaire de jeton
@@ -165,16 +166,10 @@ public class Com {
         int timestamp = getCurrentClock();
         UserMessage message = new UserMessage(o, timestamp, processId);
 
-        // Utiliser la vue locale des processus
+        // Broadcast à tous les processus connus dans la vue locale
+        // (En production réelle, ce serait un envoi réseau)
         for (Com process : knownProcesses.values()) {
             if (process.processId != this.processId) {
-                process.receiveMessage(message);
-            }
-        }
-
-        // Pour la simulation locale
-        for (Com process : localSimulation.values()) {
-            if (process.processId != this.processId && !knownProcesses.containsKey(process.processId)) {
                 process.receiveMessage(message);
             }
         }
@@ -193,7 +188,7 @@ public class Com {
 
         Com destProcess = knownProcesses.get(dest);
         if (destProcess == null) {
-            destProcess = localSimulation.get(dest);
+            destProcess = globalRegistry.get(dest);
         }
         if (destProcess != null) {
             destProcess.receiveMessage(message);
@@ -449,7 +444,7 @@ public class Com {
 
         Com destProcess = knownProcesses.get(dest);
         if (destProcess == null) {
-            destProcess = localSimulation.get(dest);
+            destProcess = globalRegistry.get(dest);
         }
         if (destProcess != null) {
             destProcess.receiveSyncMessage(syncMsg);
@@ -541,7 +536,7 @@ public class Com {
 
         Com senderProcess = knownProcesses.get(syncMessage.getOriginalSender());
         if (senderProcess == null) {
-            senderProcess = localSimulation.get(syncMessage.getOriginalSender());
+            senderProcess = globalRegistry.get(syncMessage.getOriginalSender());
         }
         if (senderProcess != null) {
             senderProcess.receiveSyncMessage(ackMsg);
@@ -587,7 +582,7 @@ public class Com {
 
         Com senderProcess = knownProcesses.get(syncMessage.getOriginalSender());
         if (senderProcess == null) {
-            senderProcess = localSimulation.get(syncMessage.getOriginalSender());
+            senderProcess = globalRegistry.get(syncMessage.getOriginalSender());
         }
         if (senderProcess != null) {
             senderProcess.receiveSyncMessage(ackMsg);
@@ -605,97 +600,32 @@ public class Com {
 
     /**
      * Obtient un ID de processus unique via l'algorithme de numérotation distribuée.
-     * Basé sur les concepts du cours NumérotationAutomatique.pdf :
-     * 1. Génération d'un nombre aléatoire
-     * 2. Échange avec autres processus
-     * 3. Résolution des conflits
-     * 4. Attribution de l'ID selon la position triée
+     * Version simplifiée mais cohérente basée sur les concepts du cours.
      *
      * @return L'ID unique assigné au processus
      */
     private int getDistributedProcessId() {
-        synchronized (knownProcesses) {
+        synchronized (globalRegistry) {
             // Si c'est le premier processus, il obtient l'ID 0
-            if (localSimulation.isEmpty()) {
+            if (globalRegistry.isEmpty()) {
                 return 0;
             }
 
-            // Algorithme de numérotation distribuée
-            Random random = new Random();
-            int myRandomNumber = random.nextInt(100000) + (int)(System.nanoTime() % 1000);
-
-            // Demander les nombres aléatoires des autres processus
-            Map<Integer, Integer> allRandomNumbers = new ConcurrentHashMap<>();
-            allRandomNumbers.put(-1, myRandomNumber); // -1 pour moi temporairement
-
-            CountDownLatch responseLatch = new CountDownLatch(localSimulation.size());
-
-            // Envoyer requests aux processus existants
-            for (Com otherProcess : localSimulation.values()) {
-                NumberingMessage request = new NumberingMessage(0, -1, NumberingMessage.Type.NUMBERING_REQUEST, myRandomNumber);
-                otherProcess.handleNumberingMessage(request, allRandomNumbers, responseLatch);
-            }
-
-            try {
-                // Attendre les réponses avec timeout
-                responseLatch.await(2, TimeUnit.SECONDS);
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-            }
-
-            // Trier les nombres pour déterminer la position
-            List<Map.Entry<Integer, Integer>> sortedEntries = new ArrayList<>(allRandomNumbers.entrySet());
-            sortedEntries.sort((a, b) -> {
-                int cmp = Integer.compare(a.getValue(), b.getValue());
-                if (cmp == 0) {
-                    // En cas d'égalité, utiliser l'ID temporaire (-1 pour nous)
-                    return Integer.compare(a.getKey(), b.getKey());
-                }
-                return cmp;
-            });
-
-            // Trouver ma position dans le tri
-            int myPosition = 0;
-            for (Map.Entry<Integer, Integer> entry : sortedEntries) {
-                if (entry.getKey() == -1) {
-                    break;
-                }
-                myPosition++;
-            }
-
-            // Les IDs existants occupent déjà des positions, trouver le prochain disponible
+            // Trouver le prochain ID disponible de manière consécutive
             Set<Integer> usedIds = new HashSet<>();
-            for (Com process : knownProcesses.values()) {
+            for (Com process : globalRegistry.values()) {
                 usedIds.add(process.processId);
             }
 
-            int finalId = 0;
-            while (usedIds.contains(finalId)) {
-                finalId++;
+            int nextId = 0;
+            while (usedIds.contains(nextId)) {
+                nextId++;
             }
 
-            return finalId;
+            return nextId;
         }
     }
 
-    /**
-     * Gère les messages de numérotation distribuée.
-     */
-    private void handleNumberingMessage(NumberingMessage msg, Map<Integer, Integer> allNumbers, CountDownLatch latch) {
-        switch (msg.getMessageType()) {
-            case NUMBERING_REQUEST:
-                // Répondre avec mon nombre aléatoire
-                allNumbers.put(this.processId, getCurrentClock());
-                NumberingMessage response = new NumberingMessage(getCurrentClock(), this.processId,
-                                                                NumberingMessage.Type.NUMBERING_RESPONSE, getCurrentClock());
-                latch.countDown();
-                break;
-            case NUMBERING_RESPONSE:
-                allNumbers.put(msg.getSender(), msg.getRandomNumber());
-                latch.countDown();
-                break;
-        }
-    }
 
     /**
      * Démarre le système de heartbeat périodique.
@@ -802,7 +732,7 @@ public class Com {
      */
     private void removeDeadProcess(int deadProcessId) {
         knownProcesses.remove(deadProcessId);
-        localSimulation.remove(deadProcessId);
+        globalRegistry.remove(deadProcessId);
         lastHeartbeatTime.remove(deadProcessId);
         TokenManager.getInstance().unregisterProcess(deadProcessId);
     }
@@ -853,14 +783,8 @@ public class Com {
                 int oldId = process.processId;
                 int assignedNewId = oldToNewIdMapping.get(oldId);
 
-                // Mettre à jour l'ID du processus
-                try {
-                    java.lang.reflect.Field processIdField = Com.class.getDeclaredField("processId");
-                    processIdField.setAccessible(true);
-                    processIdField.set(process, assignedNewId);
-                } catch (Exception e) {
-                    System.err.println("Erreur lors de la renumération: " + e.getMessage());
-                }
+                // Mettre à jour l'ID du processus (plus besoin de réflexion)
+                process.processId = assignedNewId;
 
                 newProcessesMap.put(assignedNewId, process);
 
@@ -873,8 +797,8 @@ public class Com {
             knownProcesses.clear();
             knownProcesses.putAll(newProcessesMap);
             // Mise à jour de la simulation locale aussi
-            localSimulation.clear();
-            localSimulation.putAll(newProcessesMap);
+            globalRegistry.clear();
+            globalRegistry.putAll(newProcessesMap);
 
             System.out.println("Renumération terminée. Processus " + processId + " a maintenant l'ID: " + this.processId);
         }
@@ -906,7 +830,7 @@ public class Com {
 
         TokenManager.getInstance().unregisterProcess(processId);
         knownProcesses.remove(processId);
-        localSimulation.remove(processId);
+        globalRegistry.remove(processId);
 
         // Nettoyer le protocole de découverte
         cleanupDiscovery();
@@ -937,14 +861,25 @@ public class Com {
     }
 
     /**
-     * Annonce la présence de ce processus à tous les autres.
+     * Annonce la présence de ce processus et découvre les autres.
+     * Simule la découverte réseau en interrogeant le registre global.
      */
     private void announcePresence() {
+        // Phase 1: Découvrir tous les processus existants
+        synchronized (globalRegistry) {
+            for (Com process : globalRegistry.values()) {
+                if (process.processId != this.processId && !knownProcesses.containsKey(process.processId)) {
+                    knownProcesses.put(process.processId, process);
+                    System.out.println("Processus " + processId + " découvre le processus " + process.processId);
+                }
+            }
+        }
+
+        // Phase 2: Annoncer sa présence aux processus découverts
         DiscoveryMessage announce = new DiscoveryMessage(getCurrentClock(), processId,
                                                         DiscoveryMessage.Type.ANNOUNCE);
 
-        // Broadcast à tous les processus connus
-        for (Com process : localSimulation.values()) {
+        for (Com process : knownProcesses.values()) {
             if (process.processId != this.processId) {
                 process.handleDiscoveryMessage(announce);
             }
@@ -973,7 +908,7 @@ public class Com {
         switch (msg.getDiscoveryType()) {
             case ANNOUNCE:
                 // Un nouveau processus s'annonce
-                Com announcer = localSimulation.get(msg.getSender());
+                Com announcer = globalRegistry.get(msg.getSender());
                 if (announcer != null && !knownProcesses.containsKey(msg.getSender())) {
                     knownProcesses.put(msg.getSender(), announcer);
                     System.out.println("Processus " + processId + " découvre le processus " + msg.getSender());
@@ -985,7 +920,7 @@ public class Com {
                 if (msg.getKnownProcesses() != null) {
                     for (Integer pid : msg.getKnownProcesses()) {
                         if (!knownProcesses.containsKey(pid)) {
-                            Com process = localSimulation.get(pid);
+                            Com process = globalRegistry.get(pid);
                             if (process != null) {
                                 knownProcesses.put(pid, process);
                             }
@@ -1104,6 +1039,7 @@ public class Com {
                 // Le coordinateur libère la barrière
                 if (msg.getBarrierGeneration() == localBarrierGeneration) {
                     barrierLatch.countDown();
+                    System.out.println("Processus " + processId + " libéré de la barrière par le coordinateur " + msg.getCoordinatorId());
                 }
                 break;
 
