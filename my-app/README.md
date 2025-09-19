@@ -27,8 +27,8 @@ Ce projet implémente un middleware complet pour la communication distribuée en
 - `Message` (abstraite)
   - `UserMessage` : Messages utilisateur (affectent l'horloge de Lamport)
   - `TokenMessage` : Messages de jeton (système, n'affectent pas l'horloge)
-  - `HeartbeatMessage` : Messages de heartbeat (système)
-  - `SyncMessage` : Messages de synchronisation (système)
+  - `SyncMessage` : Messages de synchronisation pour communication synchrone
+  - `HeartbeatMessage` : Messages de heartbeat (système) - *à implémenter*
 
 ## Utilisation
 
@@ -48,11 +48,11 @@ mvn exec:java -Dexec.mainClass="com.mycompany.app.App"
 # Exemple de processus original
 mvn exec:java -Dexec.mainClass="com.mycompany.app.App" -Dexec.args="process"
 
-# Jeu de dés distribué
-mvn exec:java -Dexec.mainClass="com.mycompany.app.App" -Dexec.args="dice"
+# Test de communication synchrone
+mvn exec:java -Dexec.mainClass="com.mycompany.app.App" -Dexec.args="sync"
 
-# Jeu de dés directement
-mvn exec:java -Dexec.mainClass="com.mycompany.app.DiceGame"
+# Test spécialisé de la classe de test synchrone
+mvn exec:java -Dexec.mainClass="com.mycompany.app.SyncCommunicationTest"
 ```
 
 ## API du Middleware
@@ -83,14 +83,18 @@ Message msg = com.mailbox.getMessage();
 ### Communication synchrone
 
 ```java
-// Envoi synchrone
+// Envoi synchrone (bloque jusqu'à accusé de réception)
 com.sendToSync("Hello", destinationId);
 
-// Réception synchrone
-Message msg = com.recevFromSync(senderId);
+// Réception synchrone (bloque jusqu'à recevoir de senderId)
+SyncMessage msg = com.recevFromSync(senderId);
 
-// Diffusion synchrone
+// Diffusion synchrone (bloque jusqu'à ce que tous reçoivent)
+// Si je suis l'expéditeur (processId == myId)
 com.broadcastSync("Hello everyone", myId);
+
+// Si je veux recevoir un broadcast de processId 5
+com.broadcastSync(null, 5);
 ```
 
 ### Section critique distribuée

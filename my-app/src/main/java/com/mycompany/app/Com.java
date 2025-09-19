@@ -38,6 +38,12 @@ public class Com {
     private static final Object barrierLock = new Object();
     private volatile boolean atBarrier = false;
 
+    // Communication synchrone
+    private final Map<String, CountDownLatch> pendingSyncOperations = new ConcurrentHashMap<>();
+    private final Map<String, Set<Integer>> broadcastAcksPending = new ConcurrentHashMap<>();
+    private final Map<String, SyncMessage> pendingSyncMessages = new ConcurrentHashMap<>();
+    private final AtomicInteger syncIdCounter = new AtomicInteger(0);
+
 
     /**
      * Constructeur du communicateur.
@@ -308,11 +314,257 @@ public class Com {
         }
     }
 
+    // === COMMUNICATION SYNCHRONE ===
+
+    /**
+     * Diffusion synchrone - bloque jusqu'à ce que tous les processus aient reçu le message.
+     *
+     * @param o L'objet à diffuser
+     * @param from L'identifiant du processus expéditeur
+     */
+    public void broadcastSync(Object o, int from) {
+        if (processId == from) {
+            // Je suis l'expéditeur - envoyer et attendre les accusés de réception
+            inc_clock();
+            int timestamp = getCurrentClock();
+            String syncId = processId + "-" + syncIdCounter.getAndIncrement();
+
+            Set<Integer> expectedAcks = new HashSet<>();
+            for (Integer pid : processes.keySet()) {
+                if (pid != processId) {
+                    expectedAcks.add(pid);
+                }
+            }
+
+            if (expectedAcks.isEmpty()) {
+                return; // Pas d'autres processus
+            }
+
+            broadcastAcksPending.put(syncId, expectedAcks);
+            CountDownLatch latch = new CountDownLatch(expectedAcks.size());
+            pendingSyncOperations.put(syncId, latch);
+
+            // Envoyer le message de broadcast
+            SyncMessage syncMsg = new SyncMessage(o, timestamp, processId,
+                                                SyncMessage.Type.BROADCAST_SYNC, processId, syncId);
+
+            for (Com process : processes.values()) {
+                if (process.processId != processId) {
+                    process.receiveSyncMessage(syncMsg);
+                }
+            }
+
+            // Attendre tous les accusés de réception
+            try {
+                latch.await();
+                System.out.println("Processus " + processId + " : broadcastSync terminé, tous les ACK reçus");
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            } finally {
+                pendingSyncOperations.remove(syncId);
+                broadcastAcksPending.remove(syncId);
+            }
+
+        } else {
+            // Je ne suis pas l'expéditeur - attendre le message de 'from'
+            try {
+                String syncKey = "broadcast-from-" + from;
+                CountDownLatch latch = new CountDownLatch(1);
+                pendingSyncOperations.put(syncKey, latch);
+
+                System.out.println("Processus " + processId + " attend broadcastSync de " + from);
+                latch.await();
+
+                SyncMessage receivedMsg = pendingSyncMessages.remove(syncKey);
+                if (receivedMsg != null) {
+                    System.out.println("Processus " + processId + " a reçu broadcastSync: " + receivedMsg.getPayload());
+                }
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+        }
+    }
+
+    /**
+     * Envoi synchrone - bloque jusqu'à ce que le destinataire ait reçu le message.
+     *
+     * @param o L'objet à envoyer
+     * @param dest L'identifiant du processus destinataire
+     */
+    public void sendToSync(Object o, int dest) {
+        inc_clock();
+        int timestamp = getCurrentClock();
+        String syncId = processId + "-" + syncIdCounter.getAndIncrement();
+
+        CountDownLatch latch = new CountDownLatch(1);
+        pendingSyncOperations.put(syncId, latch);
+
+        // Envoyer le message
+        SyncMessage syncMsg = new SyncMessage(o, timestamp, processId,
+                                            SyncMessage.Type.SEND_SYNC, processId, syncId);
+
+        Com destProcess = processes.get(dest);
+        if (destProcess != null) {
+            destProcess.receiveSyncMessage(syncMsg);
+
+            // Attendre l'accusé de réception
+            try {
+                System.out.println("Processus " + processId + " attend ACK de sendToSync vers " + dest);
+                latch.await();
+                System.out.println("Processus " + processId + " : sendToSync vers " + dest + " terminé");
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            } finally {
+                pendingSyncOperations.remove(syncId);
+            }
+        }
+    }
+
+    /**
+     * Réception synchrone - bloque jusqu'à recevoir un message de l'expéditeur spécifié.
+     *
+     * @param from L'identifiant du processus expéditeur attendu
+     * @return Le message reçu
+     */
+    public SyncMessage recevFromSync(int from) {
+        try {
+            String syncKey = "receive-from-" + from;
+            CountDownLatch latch = new CountDownLatch(1);
+            pendingSyncOperations.put(syncKey, latch);
+
+            System.out.println("Processus " + processId + " attend message synchrone de " + from);
+            latch.await();
+
+            SyncMessage receivedMsg = pendingSyncMessages.remove(syncKey);
+            if (receivedMsg != null) {
+                System.out.println("Processus " + processId + " a reçu message synchrone: " + receivedMsg.getPayload());
+            }
+            return receivedMsg;
+
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return null;
+        }
+    }
+
+    /**
+     * Traite la réception d'un message de synchronisation.
+     *
+     * @param syncMessage Le message de synchronisation reçu
+     */
+    private void receiveSyncMessage(SyncMessage syncMessage) {
+        // Mettre à jour l'horloge de Lamport
+        if (!syncMessage.isSystemMessage()) {
+            updateClock(syncMessage.getTimestamp());
+        }
+
+        switch (syncMessage.getMessageType()) {
+            case BROADCAST_SYNC:
+                handleBroadcastSync(syncMessage);
+                break;
+            case BROADCAST_ACK:
+                handleBroadcastAck(syncMessage);
+                break;
+            case SEND_SYNC:
+                handleSendSync(syncMessage);
+                break;
+            case SEND_ACK:
+                handleSendAck(syncMessage);
+                break;
+        }
+    }
+
+    private void handleBroadcastSync(SyncMessage syncMessage) {
+        // Stocker le message pour broadcastSync en attente
+        String syncKey = "broadcast-from-" + syncMessage.getOriginalSender();
+        pendingSyncMessages.put(syncKey, syncMessage);
+
+        // Débloquer le processus en attente
+        CountDownLatch latch = pendingSyncOperations.get(syncKey);
+        if (latch != null) {
+            latch.countDown();
+        }
+
+        // Envoyer l'accusé de réception
+        inc_clock();
+        int timestamp = getCurrentClock();
+        SyncMessage ackMsg = new SyncMessage("ACK", timestamp, processId,
+                                           SyncMessage.Type.BROADCAST_ACK,
+                                           syncMessage.getOriginalSender(), syncMessage.getSyncId());
+
+        Com senderProcess = processes.get(syncMessage.getOriginalSender());
+        if (senderProcess != null) {
+            senderProcess.receiveSyncMessage(ackMsg);
+        }
+    }
+
+    private void handleBroadcastAck(SyncMessage syncMessage) {
+        String syncId = syncMessage.getSyncId();
+        Set<Integer> pendingAcks = broadcastAcksPending.get(syncId);
+
+        if (pendingAcks != null) {
+            pendingAcks.remove(syncMessage.getSender());
+
+            if (pendingAcks.isEmpty()) {
+                // Tous les ACK reçus
+                CountDownLatch latch = pendingSyncOperations.get(syncId);
+                if (latch != null) {
+                    while (latch.getCount() > 0) {
+                        latch.countDown();
+                    }
+                }
+            }
+        }
+    }
+
+    private void handleSendSync(SyncMessage syncMessage) {
+        // Stocker le message pour recevFromSync en attente
+        String syncKey = "receive-from-" + syncMessage.getOriginalSender();
+        pendingSyncMessages.put(syncKey, syncMessage);
+
+        // Débloquer le processus en attente
+        CountDownLatch latch = pendingSyncOperations.get(syncKey);
+        if (latch != null) {
+            latch.countDown();
+        }
+
+        // Envoyer l'accusé de réception
+        inc_clock();
+        int timestamp = getCurrentClock();
+        SyncMessage ackMsg = new SyncMessage("ACK", timestamp, processId,
+                                           SyncMessage.Type.SEND_ACK,
+                                           syncMessage.getOriginalSender(), syncMessage.getSyncId());
+
+        Com senderProcess = processes.get(syncMessage.getOriginalSender());
+        if (senderProcess != null) {
+            senderProcess.receiveSyncMessage(ackMsg);
+        }
+    }
+
+    private void handleSendAck(SyncMessage syncMessage) {
+        String syncId = syncMessage.getSyncId();
+        CountDownLatch latch = pendingSyncOperations.get(syncId);
+
+        if (latch != null) {
+            latch.countDown();
+        }
+    }
+
     /**
      * Arrête le communicateur et nettoie les ressources.
      */
     public void shutdown() {
         TokenManager.getInstance().unregisterProcess(processId);
         processes.remove(processId);
+
+        // Nettoyer les opérations de synchronisation en attente
+        for (CountDownLatch latch : pendingSyncOperations.values()) {
+            while (latch.getCount() > 0) {
+                latch.countDown();
+            }
+        }
+        pendingSyncOperations.clear();
+        broadcastAcksPending.clear();
+        pendingSyncMessages.clear();
     }
 }
