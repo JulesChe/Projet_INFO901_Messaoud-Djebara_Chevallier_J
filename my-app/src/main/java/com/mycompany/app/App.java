@@ -17,7 +17,7 @@ public class App {
         String mode = args.length > 0 ? args[0] : "demo";
 
         System.out.println("=== MIDDLEWARE DISTRIBUÉ SIMPLIFIÉ ===");
-        System.out.println("Architecture 100% distribuée avec EventBus");
+        System.out.println("Architecture distribuée avec EventBus");
         System.out.println("Mode: " + mode + "\n");
 
         if ("distributed".equals(mode.toLowerCase())) {

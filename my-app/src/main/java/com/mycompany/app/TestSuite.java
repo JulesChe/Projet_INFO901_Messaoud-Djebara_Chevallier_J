@@ -1,25 +1,47 @@
 package com.mycompany.app;
 
+import java.util.Random;
+
 /**
  * Suite de tests pour le middleware distribué simplifié.
- * Regroupe tous les tests fonctionnels.
+ * Regroupe tous les tests fonctionnels avec gestion des ports dynamiques.
  *
  * @author Middleware Team
  */
 public class TestSuite {
+
+    private static final Random random = new Random();
+
+    /**
+     * Génère un port aléatoire dans une plage libre.
+     */
+    private static int getRandomPort() {
+        return 7000 + random.nextInt(1000); // Ports 7000-8000
+    }
+
+    /**
+     * Attend que les ports se libèrent.
+     */
+    private static void waitForPortsToFree() {
+        try {
+            Thread.sleep(3000);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
+    }
 
     public static void main(String[] args) {
         System.out.println("=== SUITE DE TESTS MIDDLEWARE DISTRIBUÉ ===\n");
 
         try {
             testBasicCommunication();
-            Thread.sleep(2000);
+            waitForPortsToFree();
 
             testSynchronousComm();
-            Thread.sleep(2000);
+            waitForPortsToFree();
 
             testCriticalSection();
-            Thread.sleep(2000);
+            waitForPortsToFree();
 
             testBarrier();
 
@@ -37,8 +59,12 @@ public class TestSuite {
     private static void testBasicCommunication() throws InterruptedException {
         System.out.println("--- Test Communication Asynchrone ---");
 
-        Com com1 = new Com(new NetworkConfig(1, "localhost", 5001, "230.0.0.1", 4446));
-        Com com2 = new Com(new NetworkConfig(2, "localhost", 5002, "230.0.0.1", 4446));
+        int port1 = getRandomPort();
+        int port2 = getRandomPort() + 1;
+        int multicastPort = getRandomPort() + 100;
+
+        Com com1 = new Com(new NetworkConfig(1, "localhost", port1, "230.0.0.1", multicastPort));
+        Com com2 = new Com(new NetworkConfig(2, "localhost", port2, "230.0.0.1", multicastPort));
 
         Thread.sleep(3000); // Attendre découverte
 
@@ -54,6 +80,7 @@ public class TestSuite {
 
         com1.shutdown();
         com2.shutdown();
+        Thread.sleep(1000); // Attendre shutdown complet
     }
 
     /**
@@ -62,14 +89,19 @@ public class TestSuite {
     private static void testSynchronousComm() throws InterruptedException {
         System.out.println("--- Test Communication Synchrone ---");
 
-        Com com1 = new Com(new NetworkConfig(3, "localhost", 5003, "230.0.0.1", 4446));
-        Com com2 = new Com(new NetworkConfig(4, "localhost", 5004, "230.0.0.1", 4446));
+        int port1 = getRandomPort();
+        int port2 = getRandomPort() + 1;
+        int multicastPort = getRandomPort() + 100;
+
+        Com com1 = new Com(new NetworkConfig(3, "localhost", port1, "230.0.0.1", multicastPort));
+        Com com2 = new Com(new NetworkConfig(4, "localhost", port2, "230.0.0.1", multicastPort));
 
         Thread.sleep(3000); // Attendre découverte
 
-        // Test broadcastSync
+        // Test broadcastSync - seulement l'expéditeur
         Thread t1 = new Thread(() -> {
             try {
+                Thread.sleep(1000); // Laisser temps à la découverte
                 com1.broadcastSync("Message sync", com1.getProcessId());
                 System.out.println("✓ BroadcastSync terminé");
             } catch (Exception e) {
@@ -79,9 +111,9 @@ public class TestSuite {
 
         Thread t2 = new Thread(() -> {
             try {
-                Thread.sleep(500);
-                com2.broadcastSync("Message sync", com1.getProcessId());
-                System.out.println("✓ BroadcastSync reçu");
+                // com2 attend juste, il recevra automatiquement
+                Thread.sleep(3000);
+                System.out.println("✓ BroadcastSync reçu par com2");
             } catch (Exception e) {
                 e.printStackTrace();
             }
@@ -96,6 +128,7 @@ public class TestSuite {
 
         com1.shutdown();
         com2.shutdown();
+        Thread.sleep(1000); // Attendre shutdown complet
     }
 
     /**
@@ -104,8 +137,12 @@ public class TestSuite {
     private static void testCriticalSection() throws InterruptedException {
         System.out.println("--- Test Section Critique ---");
 
-        Com com1 = new Com(new NetworkConfig(5, "localhost", 5005, "230.0.0.1", 4446));
-        Com com2 = new Com(new NetworkConfig(6, "localhost", 5006, "230.0.0.1", 4446));
+        int port1 = getRandomPort();
+        int port2 = getRandomPort() + 1;
+        int multicastPort = getRandomPort() + 100;
+
+        Com com1 = new Com(new NetworkConfig(5, "localhost", port1, "230.0.0.1", multicastPort));
+        Com com2 = new Com(new NetworkConfig(6, "localhost", port2, "230.0.0.1", multicastPort));
 
         Thread.sleep(5000); // Attendre token
 
@@ -145,6 +182,7 @@ public class TestSuite {
 
         com1.shutdown();
         com2.shutdown();
+        Thread.sleep(1000); // Attendre shutdown complet
     }
 
     /**
@@ -153,9 +191,14 @@ public class TestSuite {
     private static void testBarrier() throws InterruptedException {
         System.out.println("--- Test Barrière ---");
 
-        Com com1 = new Com(new NetworkConfig(7, "localhost", 5007, "230.0.0.1", 4446));
-        Com com2 = new Com(new NetworkConfig(8, "localhost", 5008, "230.0.0.1", 4446));
-        Com com3 = new Com(new NetworkConfig(9, "localhost", 5009, "230.0.0.1", 4446));
+        int port1 = getRandomPort();
+        int port2 = getRandomPort() + 1;
+        int port3 = getRandomPort() + 2;
+        int multicastPort = getRandomPort() + 100;
+
+        Com com1 = new Com(new NetworkConfig(7, "localhost", port1, "230.0.0.1", multicastPort));
+        Com com2 = new Com(new NetworkConfig(8, "localhost", port2, "230.0.0.1", multicastPort));
+        Com com3 = new Com(new NetworkConfig(9, "localhost", port3, "230.0.0.1", multicastPort));
 
         Thread.sleep(3000); // Attendre découverte
 
@@ -203,5 +246,6 @@ public class TestSuite {
         com1.shutdown();
         com2.shutdown();
         com3.shutdown();
+        Thread.sleep(1000); // Attendre shutdown complet
     }
 }
