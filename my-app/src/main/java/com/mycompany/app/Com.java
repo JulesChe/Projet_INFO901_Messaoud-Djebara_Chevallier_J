@@ -49,6 +49,13 @@ public class Com {
     private final CountDownLatch numberingLatch = new CountDownLatch(1);
     private final Object numberingLock = new Object();
 
+    // Système de heartbeat et détection de pannes
+    private final Map<Integer, Long> lastHeartbeatTime = new ConcurrentHashMap<>();
+    private final ScheduledExecutorService heartbeatExecutor = Executors.newScheduledThreadPool(2);
+    private static final long HEARTBEAT_INTERVAL = 2000; // 2 secondes
+    private static final long HEARTBEAT_TIMEOUT = 6000;  // 6 secondes
+    private volatile boolean heartbeatActive = true;
+
 
     /**
      * Constructeur du communicateur.
@@ -67,6 +74,9 @@ public class Com {
 
         // Enregistrer ce processus auprès du gestionnaire de jeton
         TokenManager.getInstance().registerProcess(processId, this);
+
+        // Démarrer le système de heartbeat
+        startHeartbeat();
     }
 
     /**
@@ -163,6 +173,7 @@ public class Com {
     /**
      * Reçoit un message et le place dans la boîte aux lettres.
      * Ne met à jour l'horloge que pour les messages non-système.
+     * Gère spécialement les messages de heartbeat.
      *
      * @param message Le message reçu
      */
@@ -170,7 +181,13 @@ public class Com {
         if (!message.isSystemMessage()) {
             updateClock(message.getTimestamp());
         }
-        mailbox.putMessage(message);
+
+        // Traitement spécial pour les messages de heartbeat
+        if (message instanceof HeartbeatMessage) {
+            handleHeartbeatMessage((HeartbeatMessage) message);
+        } else {
+            mailbox.putMessage(message);
+        }
     }
 
     /**
@@ -651,9 +668,208 @@ public class Com {
     }
 
     /**
+     * Démarre le système de heartbeat périodique.
+     * Envoie des messages de vie toutes les HEARTBEAT_INTERVAL millisecondes.
+     * Surveille également les autres processus pour détecter les pannes.
+     */
+    private void startHeartbeat() {
+        // Envoyer des heartbeats périodiques
+        heartbeatExecutor.scheduleAtFixedRate(() -> {
+            if (heartbeatActive) {
+                sendHeartbeat();
+            }
+        }, HEARTBEAT_INTERVAL, HEARTBEAT_INTERVAL, TimeUnit.MILLISECONDS);
+
+        // Surveiller les autres processus
+        heartbeatExecutor.scheduleAtFixedRate(() -> {
+            if (heartbeatActive) {
+                checkForDeadProcesses();
+            }
+        }, HEARTBEAT_TIMEOUT, HEARTBEAT_INTERVAL, TimeUnit.MILLISECONDS);
+    }
+
+    /**
+     * Envoie un message de heartbeat à tous les autres processus.
+     */
+    private void sendHeartbeat() {
+        HeartbeatMessage heartbeat = new HeartbeatMessage(getCurrentClock(), processId, HeartbeatMessage.Type.HEARTBEAT);
+
+        for (Com process : processes.values()) {
+            if (process.processId != this.processId) {
+                process.receiveMessage(heartbeat);
+            }
+        }
+    }
+
+    /**
+     * Gère la réception d'un message de heartbeat.
+     */
+    private void handleHeartbeatMessage(HeartbeatMessage heartbeat) {
+        switch (heartbeat.getHeartbeatType()) {
+            case HEARTBEAT:
+                // Mettre à jour le timestamp du dernier heartbeat reçu
+                lastHeartbeatTime.put(heartbeat.getSender(), System.currentTimeMillis());
+                break;
+
+            case PROCESS_DEAD_NOTIFY:
+                // Un autre processus signale qu'un processus est mort
+                int deadId = heartbeat.getDeadProcessId();
+                removeDeadProcess(deadId);
+                break;
+
+            case RENUMBER_REQUEST:
+                // Demande de renumération suite à une panne
+                handleRenumberRequest();
+                break;
+        }
+    }
+
+    /**
+     * Vérifie si des processus n'ont pas envoyé de heartbeat récemment.
+     */
+    private void checkForDeadProcesses() {
+        long currentTime = System.currentTimeMillis();
+        Set<Integer> deadProcesses = new HashSet<>();
+
+        for (Map.Entry<Integer, Long> entry : lastHeartbeatTime.entrySet()) {
+            int otherProcessId = entry.getKey();
+            long lastSeen = entry.getValue();
+
+            if (currentTime - lastSeen > HEARTBEAT_TIMEOUT && processes.containsKey(otherProcessId)) {
+                deadProcesses.add(otherProcessId);
+            }
+        }
+
+        // Signaler les processus morts et déclencher la renumération
+        for (int deadId : deadProcesses) {
+            System.out.println("Processus " + processId + " détecte que le processus " + deadId + " est mort");
+            notifyProcessDead(deadId);
+            removeDeadProcess(deadId);
+        }
+
+        if (!deadProcesses.isEmpty()) {
+            // Déclencher la renumération
+            triggerRenumbering();
+        }
+    }
+
+    /**
+     * Notifie les autres processus qu'un processus est mort.
+     */
+    private void notifyProcessDead(int deadProcessId) {
+        HeartbeatMessage deathNotification = new HeartbeatMessage(getCurrentClock(), processId,
+                                                                 HeartbeatMessage.Type.PROCESS_DEAD_NOTIFY, deadProcessId);
+
+        for (Com process : processes.values()) {
+            if (process.processId != this.processId && process.processId != deadProcessId) {
+                process.receiveMessage(deathNotification);
+            }
+        }
+    }
+
+    /**
+     * Supprime un processus mort de toutes les structures.
+     */
+    private void removeDeadProcess(int deadProcessId) {
+        processes.remove(deadProcessId);
+        lastHeartbeatTime.remove(deadProcessId);
+        TokenManager.getInstance().unregisterProcess(deadProcessId);
+    }
+
+    /**
+     * Déclenche la renumération des processus survivants.
+     */
+    private void triggerRenumbering() {
+        System.out.println("Processus " + processId + " déclenche la renumération");
+
+        // Envoyer demande de renumération à tous les processus survivants
+        HeartbeatMessage renumberRequest = new HeartbeatMessage(getCurrentClock(), processId,
+                                                               HeartbeatMessage.Type.RENUMBER_REQUEST);
+
+        for (Com process : processes.values()) {
+            if (process.processId != this.processId) {
+                process.receiveMessage(renumberRequest);
+            }
+        }
+
+        // Effectuer la renumération
+        performRenumbering();
+    }
+
+    /**
+     * Effectue la renumération des processus survivants.
+     * Les IDs sont réassignés de manière consécutive en commençant par 0.
+     */
+    private void performRenumbering() {
+        synchronized (processes) {
+            // Récupérer tous les processus survivants triés par leur ID actuel
+            List<Com> survivingProcesses = new ArrayList<>(processes.values());
+            survivingProcesses.sort((a, b) -> Integer.compare(a.processId, b.processId));
+
+            // Réassigner les IDs de manière consécutive
+            Map<Integer, Integer> oldToNewIdMapping = new HashMap<>();
+            int newId = 0;
+
+            for (Com process : survivingProcesses) {
+                int oldId = process.processId;
+                oldToNewIdMapping.put(oldId, newId);
+                newId++;
+            }
+
+            // Appliquer la renumération
+            Map<Integer, Com> newProcessesMap = new ConcurrentHashMap<>();
+            for (Com process : survivingProcesses) {
+                int oldId = process.processId;
+                int assignedNewId = oldToNewIdMapping.get(oldId);
+
+                // Mettre à jour l'ID du processus
+                try {
+                    java.lang.reflect.Field processIdField = Com.class.getDeclaredField("processId");
+                    processIdField.setAccessible(true);
+                    processIdField.set(process, assignedNewId);
+                } catch (Exception e) {
+                    System.err.println("Erreur lors de la renumération: " + e.getMessage());
+                }
+
+                newProcessesMap.put(assignedNewId, process);
+
+                // Réenregistrer auprès du TokenManager
+                TokenManager.getInstance().unregisterProcess(oldId);
+                TokenManager.getInstance().registerProcess(assignedNewId, process);
+            }
+
+            // Remplacer la map des processus
+            processes.clear();
+            processes.putAll(newProcessesMap);
+
+            System.out.println("Renumération terminée. Processus " + processId + " a maintenant l'ID: " + this.processId);
+        }
+    }
+
+    /**
+     * Gère une demande de renumération reçue d'un autre processus.
+     */
+    private void handleRenumberRequest() {
+        // Participer à la renumération
+        performRenumbering();
+    }
+
+    /**
      * Arrête le communicateur et nettoie les ressources.
      */
     public void shutdown() {
+        heartbeatActive = false;
+        heartbeatExecutor.shutdown();
+
+        try {
+            if (!heartbeatExecutor.awaitTermination(1, TimeUnit.SECONDS)) {
+                heartbeatExecutor.shutdownNow();
+            }
+        } catch (InterruptedException e) {
+            heartbeatExecutor.shutdownNow();
+            Thread.currentThread().interrupt();
+        }
+
         TokenManager.getInstance().unregisterProcess(processId);
         processes.remove(processId);
 

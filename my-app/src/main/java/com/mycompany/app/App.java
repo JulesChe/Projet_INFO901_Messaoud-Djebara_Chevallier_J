@@ -12,7 +12,8 @@ public class App {
      *
      * @param args Arguments de ligne de commande :
      *             - "process" : Lance l'exemple avec des processus originaux
-     *             - "dice" : Lance le jeu de dés
+     *             - "sync" : Lance les tests de communication synchrone
+     *             - "heartbeat" : Lance le test de heartbeat et renumération
      *             - "demo" : Lance une démonstration complète (par défaut)
      */
     public static void main(String[] args) {
@@ -27,6 +28,9 @@ public class App {
                 break;
             case "sync":
                 runSyncCommunicationTest();
+                break;
+            case "heartbeat":
+                runHeartbeatTest();
                 break;
             case "demo":
             default:
@@ -414,6 +418,70 @@ public class App {
         com1.shutdown();
 
         System.out.println("Test sendToSync/recevFromSync terminé.\n");
+    }
+
+    /**
+     * Test du système de heartbeat et de renumération automatique.
+     * Démontre la détection de pannes et la correction de la numérotation.
+     */
+    private static void runHeartbeatTest() {
+        System.out.println("=== TEST HEARTBEAT ET RENUMÉRATION ===\n");
+        System.out.println("Ce test démontre :");
+        System.out.println("1. La création de processus avec numérotation automatique");
+        System.out.println("2. L'envoi périodique de heartbeats");
+        System.out.println("3. La détection de panne d'un processus");
+        System.out.println("4. La renumération automatique des processus survivants\n");
+
+        Com com0 = new Com();
+        Com com1 = new Com();
+        Com com2 = new Com();
+        Com com3 = new Com();
+
+        System.out.println("Processus créés avec IDs: " + com0.getProcessId() + ", " +
+                          com1.getProcessId() + ", " + com2.getProcessId() + ", " + com3.getProcessId());
+        System.out.println("Nombre total de processus: " + Com.getProcessCount() + "\n");
+
+        try {
+            // Phase 1: Laisser les heartbeats fonctionner normalement
+            System.out.println("Phase 1: Heartbeats normaux pendant 8 secondes...");
+            Thread.sleep(8000);
+
+            // Phase 2: Simuler la panne du processus 2
+            System.out.println("\nPhase 2: Simulation de la panne du processus " + com2.getProcessId());
+            com2.shutdown(); // Arrêter le processus 2 (simulation de panne)
+
+            // Phase 3: Attendre la détection de panne et la renumération
+            System.out.println("Attente de la détection de panne et renumération...");
+            Thread.sleep(10000);
+
+            // Phase 4: Vérifier la nouvelle numérotation
+            System.out.println("\nPhase 4: État final après renumération:");
+            System.out.println("Nombre de processus survivants: " + Com.getProcessCount());
+            System.out.println("IDs des processus survivants:");
+            System.out.println("- Processus 0: " + com0.getProcessId());
+            System.out.println("- Processus 1: " + com1.getProcessId());
+            System.out.println("- Processus 3: " + com3.getProcessId());
+
+            // Phase 5: Créer un nouveau processus pour vérifier la numérotation
+            System.out.println("\nPhase 5: Création d'un nouveau processus...");
+            Com com4 = new Com();
+            System.out.println("Nouveau processus créé avec ID: " + com4.getProcessId());
+            System.out.println("Nombre total final: " + Com.getProcessCount());
+
+            Thread.sleep(3000);
+
+            com4.shutdown();
+
+        } catch (InterruptedException e) {
+            e.printStackTrace();
+        } finally {
+            // Nettoyer tous les processus
+            com0.shutdown();
+            com1.shutdown();
+            com3.shutdown();
+        }
+
+        System.out.println("\n=== TEST HEARTBEAT TERMINÉ ===");
     }
 
 }
