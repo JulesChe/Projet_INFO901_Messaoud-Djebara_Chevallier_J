@@ -18,7 +18,6 @@ import java.util.concurrent.atomic.AtomicInteger;
 public class Com {
 
     private static final Map<Integer, Com> processes = new ConcurrentHashMap<>();
-    private static final AtomicInteger nextId = new AtomicInteger(0);
 
     private final int processId;
     private final Semaphore clockSemaphore;
@@ -44,13 +43,20 @@ public class Com {
     private final Map<String, SyncMessage> pendingSyncMessages = new ConcurrentHashMap<>();
     private final AtomicInteger syncIdCounter = new AtomicInteger(0);
 
+    // Numérotation automatique distribuée
+    private volatile boolean numberingInProgress = false;
+    private final Map<Integer, Integer> participantRandomNumbers = new ConcurrentHashMap<>();
+    private final CountDownLatch numberingLatch = new CountDownLatch(1);
+    private final Object numberingLock = new Object();
+
 
     /**
      * Constructeur du communicateur.
      * Initialise l'horloge de Lamport et la boîte aux lettres.
+     * Utilise l'algorithme de numérotation automatique distribuée.
      */
     public Com() {
-        this.processId = nextId.getAndIncrement();
+        this.processId = getDistributedProcessId();
         this.clockSemaphore = new Semaphore(1);
         this.lamportClock = 0;
         this.mailbox = new Mailbox();
@@ -547,6 +553,100 @@ public class Com {
 
         if (latch != null) {
             latch.countDown();
+        }
+    }
+
+    /**
+     * Obtient un ID de processus unique via l'algorithme de numérotation distribuée.
+     * Basé sur les concepts du cours NumérotationAutomatique.pdf :
+     * 1. Génération d'un nombre aléatoire
+     * 2. Échange avec autres processus
+     * 3. Résolution des conflits
+     * 4. Attribution de l'ID selon la position triée
+     *
+     * @return L'ID unique assigné au processus
+     */
+    private int getDistributedProcessId() {
+        synchronized (processes) {
+            // Si c'est le premier processus, il obtient l'ID 0
+            if (processes.isEmpty()) {
+                return 0;
+            }
+
+            // Algorithme de numérotation distribuée
+            Random random = new Random();
+            int myRandomNumber = random.nextInt(100000) + (int)(System.nanoTime() % 1000);
+
+            // Demander les nombres aléatoires des autres processus
+            Map<Integer, Integer> allRandomNumbers = new ConcurrentHashMap<>();
+            allRandomNumbers.put(-1, myRandomNumber); // -1 pour moi temporairement
+
+            CountDownLatch responseLatch = new CountDownLatch(processes.size());
+
+            // Envoyer requests aux processus existants
+            for (Com otherProcess : processes.values()) {
+                NumberingMessage request = new NumberingMessage(0, -1, NumberingMessage.Type.NUMBERING_REQUEST, myRandomNumber);
+                otherProcess.handleNumberingMessage(request, allRandomNumbers, responseLatch);
+            }
+
+            try {
+                // Attendre les réponses avec timeout
+                responseLatch.await(2, TimeUnit.SECONDS);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+
+            // Trier les nombres pour déterminer la position
+            List<Map.Entry<Integer, Integer>> sortedEntries = new ArrayList<>(allRandomNumbers.entrySet());
+            sortedEntries.sort((a, b) -> {
+                int cmp = Integer.compare(a.getValue(), b.getValue());
+                if (cmp == 0) {
+                    // En cas d'égalité, utiliser l'ID temporaire (-1 pour nous)
+                    return Integer.compare(a.getKey(), b.getKey());
+                }
+                return cmp;
+            });
+
+            // Trouver ma position dans le tri
+            int myPosition = 0;
+            for (Map.Entry<Integer, Integer> entry : sortedEntries) {
+                if (entry.getKey() == -1) {
+                    break;
+                }
+                myPosition++;
+            }
+
+            // Les IDs existants occupent déjà des positions, trouver le prochain disponible
+            Set<Integer> usedIds = new HashSet<>();
+            for (Com process : processes.values()) {
+                usedIds.add(process.processId);
+            }
+
+            int finalId = 0;
+            while (usedIds.contains(finalId)) {
+                finalId++;
+            }
+
+            return finalId;
+        }
+    }
+
+    /**
+     * Gère les messages de numérotation distribuée.
+     */
+    private void handleNumberingMessage(NumberingMessage msg, Map<Integer, Integer> allNumbers, CountDownLatch latch) {
+        switch (msg.getMessageType()) {
+            case NUMBERING_REQUEST:
+                // Répondre avec mon nombre aléatoire
+                allNumbers.put(this.processId, getCurrentClock());
+                NumberingMessage response = new NumberingMessage(getCurrentClock(), this.processId,
+                                                                NumberingMessage.Type.NUMBERING_RESPONSE, getCurrentClock());
+                latch.countDown();
+                break;
+            case NUMBERING_RESPONSE:
+                allNumbers.put(msg.getSender(), msg.getRandomNumber());
+                latch.countDown();
+                break;
         }
     }
 
