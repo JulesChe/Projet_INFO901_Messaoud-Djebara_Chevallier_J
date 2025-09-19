@@ -439,7 +439,7 @@ public class App {
 
         System.out.println("Processus créés avec IDs: " + com0.getProcessId() + ", " +
                           com1.getProcessId() + ", " + com2.getProcessId() + ", " + com3.getProcessId());
-        System.out.println("Nombre total de processus: " + Com.getProcessCount() + "\n");
+        System.out.println("Nombre total de processus: " + com0.getProcessCount() + "\n");
 
         try {
             // Phase 1: Laisser les heartbeats fonctionner normalement
@@ -456,7 +456,7 @@ public class App {
 
             // Phase 4: Vérifier la nouvelle numérotation
             System.out.println("\nPhase 4: État final après renumération:");
-            System.out.println("Nombre de processus survivants: " + Com.getProcessCount());
+            System.out.println("Nombre de processus survivants: " + com0.getProcessCount());
             System.out.println("IDs des processus survivants:");
             System.out.println("- Processus 0: " + com0.getProcessId());
             System.out.println("- Processus 1: " + com1.getProcessId());
@@ -466,7 +466,7 @@ public class App {
             System.out.println("\nPhase 5: Création d'un nouveau processus...");
             Com com4 = new Com();
             System.out.println("Nouveau processus créé avec ID: " + com4.getProcessId());
-            System.out.println("Nombre total final: " + Com.getProcessCount());
+            System.out.println("Nombre total final: " + com4.getProcessCount());
 
             Thread.sleep(3000);
 
