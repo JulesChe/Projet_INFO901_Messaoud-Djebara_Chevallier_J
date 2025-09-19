@@ -3,209 +3,110 @@ package com.mycompany.app;
 import java.io.*;
 import java.net.*;
 import java.util.concurrent.*;
-import java.util.function.Consumer;
 import java.lang.reflect.Method;
 import java.util.*;
 
 /**
- * Bus de messages distribué inspiré de Google Guava EventBus.
- * Permet la communication entre processus sur le réseau avec le pattern @Subscribe.
- *
- * Architecture distribuée basée sur les concepts du cours :
- * - Communication par messages sérialisés
- * - Découverte automatique par multicast
- * - Horloge de Lamport distribuée
+ * Bus de messages distribué simplifié.
+ * Version allégée avec TCP et multicast intégrés.
  *
  * @author Middleware Team
  */
 public class DistributedEventBus {
 
     private final NetworkConfig config;
-    private final ExecutorService networkExecutor;
-    private final ExecutorService messageProcessor;
-
-    // Abonnés locaux pour le pattern @Subscribe
-    private final Map<Class<?>, List<SubscriberMethod>> subscribers = new ConcurrentHashMap<>();
-
-    // Endpoints des processus connus
+    private final ExecutorService executor;
+    private final Map<Class<?>, List<Method>> subscribers = new ConcurrentHashMap<>();
+    private final Map<Class<?>, Object> subscriberInstances = new ConcurrentHashMap<>();
     private final Map<Integer, ProcessEndpoint> knownEndpoints = new ConcurrentHashMap<>();
 
-    // Socket serveur pour écouter les messages entrants
     private ServerSocket serverSocket;
-    private volatile boolean running = false;
-
-    // Service de découverte multicast
     private MulticastSocket multicastSocket;
     private InetAddress multicastGroup;
+    private volatile boolean running = false;
 
-    /**
-     * Constructeur du bus distribué.
-     *
-     * @param config Configuration réseau
-     */
     public DistributedEventBus(NetworkConfig config) {
         this.config = config;
-        this.networkExecutor = Executors.newCachedThreadPool();
-        this.messageProcessor = Executors.newFixedThreadPool(4);
+        this.executor = Executors.newCachedThreadPool();
+        startServices();
+    }
 
+    private void startServices() {
         try {
-            initializeNetworking();
-            startDiscoveryService();
+            // Démarrer serveur TCP
+            serverSocket = new ServerSocket(config.getBasePort());
+            running = true;
+
+            // Démarrer multicast pour découverte
+            multicastSocket = new MulticastSocket(config.getMulticastPort());
+            multicastGroup = InetAddress.getByName(config.getMulticastGroup());
+            multicastSocket.joinGroup(multicastGroup);
+
+            // Écouter TCP et multicast
+            executor.submit(this::listenTCP);
+            executor.submit(this::listenMulticast);
+            executor.submit(this::announcePresence);
+
         } catch (IOException e) {
-            throw new RuntimeException("Impossible d'initialiser le bus distribué", e);
+            throw new RuntimeException("Erreur démarrage EventBus", e);
         }
     }
 
-    /**
-     * Initialise la couche réseau TCP pour la communication.
-     */
-    private void initializeNetworking() throws IOException {
-        // Démarrer le serveur TCP pour recevoir les messages
-        serverSocket = new ServerSocket(config.getBasePort());
-        running = true;
-
-        // Thread pour accepter les connexions entrantes
-        networkExecutor.submit(() -> {
-            while (running) {
-                try {
-                    Socket clientSocket = serverSocket.accept();
-                    // Traiter chaque connexion dans un thread séparé
-                    messageProcessor.submit(() -> handleIncomingConnection(clientSocket));
-                } catch (IOException e) {
-                    if (running) {
-                        System.err.println("Erreur lors de l'acceptation de connexion: " + e.getMessage());
-                    }
-                }
-            }
-        });
-
-        System.out.println("DistributedEventBus en écoute sur port " + config.getBasePort());
-    }
-
-    /**
-     * Démarre le service de découverte multicast.
-     */
-    private void startDiscoveryService() throws IOException {
-        multicastGroup = InetAddress.getByName(config.getMulticastGroup());
-        multicastSocket = new MulticastSocket(config.getMulticastPort());
-        multicastSocket.joinGroup(multicastGroup);
-
-        // Thread pour écouter les annonces multicast
-        networkExecutor.submit(() -> {
-            byte[] buffer = new byte[1024];
-            while (running) {
-                try {
-                    DatagramPacket packet = new DatagramPacket(buffer, buffer.length);
-                    multicastSocket.receive(packet);
-                    handleDiscoveryMessage(packet);
-                } catch (IOException e) {
-                    if (running) {
-                        System.err.println("Erreur de découverte multicast: " + e.getMessage());
-                    }
-                }
-            }
-        });
-
-        // Annoncer périodiquement notre présence
-        networkExecutor.submit(() -> {
-            while (running) {
-                try {
-                    announcePresence();
-                    Thread.sleep(5000); // Annonce toutes les 5 secondes
-                } catch (InterruptedException e) {
-                    Thread.currentThread().interrupt();
-                    break;
-                } catch (IOException e) {
-                    System.err.println("Erreur lors de l'annonce: " + e.getMessage());
-                }
-            }
-        });
-    }
-
-    /**
-     * Enregistre un objet pour recevoir des messages via @Subscribe.
-     *
-     * @param subscriber L'objet à enregistrer
-     */
     public void registerSubscriber(Object subscriber) {
         Class<?> clazz = subscriber.getClass();
+        List<Method> methods = new ArrayList<>();
 
-        // Rechercher toutes les méthodes annotées @Subscribe
         for (Method method : clazz.getDeclaredMethods()) {
-            if (method.isAnnotationPresent(Subscribe.class)) {
-                Class<?>[] paramTypes = method.getParameterTypes();
-                if (paramTypes.length == 1) {
-                    Class<?> messageType = paramTypes[0];
+            if (method.isAnnotationPresent(Subscribe.class) && method.getParameterCount() == 1) {
+                method.setAccessible(true);
+                methods.add(method);
+            }
+        }
 
-                    subscribers.computeIfAbsent(messageType, k -> new ArrayList<>())
-                             .add(new SubscriberMethod(subscriber, method));
+        if (!methods.isEmpty()) {
+            subscribers.put(clazz, methods);
+            subscriberInstances.put(clazz, subscriber); // Stocker l'instance
+        }
+    }
+
+    public void post(Object message) {
+        // Livrer localement
+        deliverLocally(message);
+
+        // Envoyer à tous les endpoints connus
+        for (ProcessEndpoint endpoint : knownEndpoints.values()) {
+            sendToEndpoint(endpoint, message);
+        }
+    }
+
+    public void sendTo(int targetId, Object message) {
+        ProcessEndpoint target = knownEndpoints.get(targetId);
+        if (target != null) {
+            sendToEndpoint(target, message);
+        }
+    }
+
+    private void deliverLocally(Object message) {
+        for (Map.Entry<Class<?>, List<Method>> entry : subscribers.entrySet()) {
+            Object subscriber = getSubscriberInstance(entry.getKey());
+            if (subscriber != null) {
+                for (Method method : entry.getValue()) {
+                    if (method.getParameterTypes()[0].isAssignableFrom(message.getClass())) {
+                        executor.submit(() -> {
+                            try {
+                                method.invoke(subscriber, message);
+                            } catch (Exception e) {
+                                System.err.println("Erreur invocation: " + e.getMessage());
+                            }
+                        });
+                    }
                 }
             }
         }
     }
 
-    /**
-     * Publie un message sur le bus distribué.
-     * Le message sera envoyé à tous les processus connus.
-     *
-     * @param message Le message à publier
-     */
-    public void post(Object message) {
-        if (!(message instanceof Serializable)) {
-            throw new IllegalArgumentException("Le message doit être sérialisable: " + message.getClass());
-        }
-
-        // D'abord, livrer localement
-        deliverLocally(message);
-
-        // Ensuite, envoyer aux autres processus
-        for (ProcessEndpoint endpoint : knownEndpoints.values()) {
-            if (!endpoint.equals(getLocalEndpoint())) {
-                sendToEndpoint(endpoint, message);
-            }
-        }
-    }
-
-    /**
-     * Envoie un message à un processus spécifique.
-     *
-     * @param targetProcessId ID du processus destinataire
-     * @param message Le message à envoyer
-     */
-    public void sendTo(int targetProcessId, Object message) {
-        ProcessEndpoint target = knownEndpoints.get(targetProcessId);
-        if (target != null) {
-            sendToEndpoint(target, message);
-        } else {
-            System.err.println("Processus " + targetProcessId + " inconnu");
-        }
-    }
-
-    /**
-     * Livre un message localement aux abonnés.
-     */
-    private void deliverLocally(Object message) {
-        Class<?> messageType = message.getClass();
-        List<SubscriberMethod> methods = subscribers.get(messageType);
-
-        if (methods != null) {
-            for (SubscriberMethod subscriber : methods) {
-                messageProcessor.submit(() -> {
-                    try {
-                        subscriber.method.invoke(subscriber.instance, message);
-                    } catch (Exception e) {
-                        System.err.println("Erreur lors de la livraison du message: " + e.getMessage());
-                    }
-                });
-            }
-        }
-    }
-
-    /**
-     * Envoie un message à un endpoint spécifique.
-     */
     private void sendToEndpoint(ProcessEndpoint endpoint, Object message) {
-        networkExecutor.submit(() -> {
+        executor.submit(() -> {
             try (Socket socket = new Socket(endpoint.getHostname(), endpoint.getPort());
                  ObjectOutputStream out = new ObjectOutputStream(socket.getOutputStream())) {
 
@@ -213,133 +114,123 @@ public class DistributedEventBus {
                 out.flush();
 
             } catch (IOException e) {
-                System.err.println("Impossible d'envoyer message à " + endpoint + ": " + e.getMessage());
-                // Marquer l'endpoint comme potentiellement mort
-                handleDeadEndpoint(endpoint);
+                // Endpoint indisponible, le supprimer
+                knownEndpoints.remove(endpoint.getProcessId());
             }
         });
     }
 
-    /**
-     * Gère une connexion entrante et traite les messages reçus.
-     */
-    private void handleIncomingConnection(Socket socket) {
-        try (ObjectInputStream in = new ObjectInputStream(socket.getInputStream())) {
-
-            Object message = in.readObject();
-
-            // Livrer le message localement
-            deliverLocally(message);
-
-        } catch (IOException | ClassNotFoundException e) {
-            System.err.println("Erreur lors du traitement du message entrant: " + e.getMessage());
-        } finally {
+    private void listenTCP() {
+        while (running) {
             try {
-                socket.close();
+                Socket clientSocket = serverSocket.accept();
+                executor.submit(() -> handleIncomingMessage(clientSocket));
             } catch (IOException e) {
-                // Ignorer les erreurs de fermeture
-            }
-        }
-    }
-
-    /**
-     * Annonce notre présence en multicast.
-     */
-    private void announcePresence() throws IOException {
-        ProcessEndpoint localEndpoint = getLocalEndpoint();
-        String announcement = "PROCESS_ANNOUNCE:" + localEndpoint.getProcessId() +
-                             ":" + localEndpoint.getHostname() + ":" + localEndpoint.getPort();
-
-        byte[] data = announcement.getBytes();
-        DatagramPacket packet = new DatagramPacket(data, data.length,
-                                                  multicastGroup, config.getMulticastPort());
-        multicastSocket.send(packet);
-    }
-
-    /**
-     * Traite un message de découverte reçu.
-     */
-    private void handleDiscoveryMessage(DatagramPacket packet) {
-        String message = new String(packet.getData(), 0, packet.getLength());
-
-        if (message.startsWith("PROCESS_ANNOUNCE:")) {
-            String[] parts = message.split(":");
-            if (parts.length >= 4) {
-                try {
-                    int processId = Integer.parseInt(parts[1]);
-                    String hostname = parts[2];
-                    int port = Integer.parseInt(parts[3]);
-
-                    ProcessEndpoint endpoint = new ProcessEndpoint(processId, hostname, port);
-
-                    // Éviter de s'ajouter soi-même
-                    if (!endpoint.equals(getLocalEndpoint())) {
-                        knownEndpoints.put(processId, endpoint);
-                        System.out.println("Processus découvert: " + endpoint);
-
-                        // Notifier les abonnés de la découverte
-                        deliverLocally(new EndpointDiscoveredMessage(endpoint));
-                    }
-
-                } catch (NumberFormatException e) {
-                    System.err.println("Message de découverte mal formé: " + message);
+                if (running) {
+                    System.err.println("Erreur TCP: " + e.getMessage());
                 }
             }
         }
     }
 
-    /**
-     * Obtient l'endpoint local de ce processus.
-     */
-    private ProcessEndpoint getLocalEndpoint() {
-        return new ProcessEndpoint(config.getProcessId(),
-                                 config.getBindAddress(),
-                                 config.getBasePort());
+    private void handleIncomingMessage(Socket socket) {
+        try (ObjectInputStream in = new ObjectInputStream(socket.getInputStream())) {
+            Object message = in.readObject();
+            deliverLocally(message);
+        } catch (Exception e) {
+            System.err.println("Erreur lecture message: " + e.getMessage());
+        } finally {
+            try {
+                socket.close();
+            } catch (IOException e) {
+                // Ignore
+            }
+        }
     }
 
-    /**
-     * Gère un endpoint qui semble être mort.
-     */
-    private void handleDeadEndpoint(ProcessEndpoint endpoint) {
-        knownEndpoints.remove(endpoint.getProcessId());
-        System.out.println("Processus supprimé (semble mort): " + endpoint);
+    private void listenMulticast() {
+        byte[] buffer = new byte[1024];
+        while (running) {
+            try {
+                DatagramPacket packet = new DatagramPacket(buffer, buffer.length);
+                multicastSocket.receive(packet);
+
+                String data = new String(packet.getData(), 0, packet.getLength());
+                String[] parts = data.split(":");
+
+                if (parts.length == 3 && "DISCOVERY".equals(parts[0])) {
+                    int processId = Integer.parseInt(parts[1]);
+                    int port = Integer.parseInt(parts[2]);
+
+                    if (processId != config.getProcessId()) {
+                        ProcessEndpoint endpoint = new ProcessEndpoint(processId, packet.getAddress().getHostAddress(), port);
+                        knownEndpoints.put(processId, endpoint);
+                    }
+                }
+            } catch (Exception e) {
+                if (running) {
+                    System.err.println("Erreur multicast: " + e.getMessage());
+                }
+            }
+        }
     }
 
-    /**
-     * Obtient la liste des processus connus.
-     */
+    private void announcePresence() {
+        while (running) {
+            try {
+                String announcement = "DISCOVERY:" + config.getProcessId() + ":" + config.getBasePort();
+                byte[] data = announcement.getBytes();
+                DatagramPacket packet = new DatagramPacket(data, data.length, multicastGroup, config.getMulticastPort());
+                multicastSocket.send(packet);
+
+                Thread.sleep(5000); // Annoncer toutes les 5 secondes
+            } catch (Exception e) {
+                if (running) {
+                    System.err.println("Erreur annonce: " + e.getMessage());
+                }
+            }
+        }
+    }
+
+    private Object getSubscriberInstance(Class<?> clazz) {
+        // Retourner l'instance stockée lors de l'enregistrement
+        return subscriberInstances.get(clazz);
+    }
+
     public Map<Integer, ProcessEndpoint> getKnownEndpoints() {
         return new HashMap<>(knownEndpoints);
     }
 
-    /**
-     * Arrête le bus distribué et libère les ressources.
-     */
+    public ProcessEndpoint getLocalEndpoint() {
+        return new ProcessEndpoint(config.getProcessId(), config.getHostname(), config.getBasePort());
+    }
+
     public void shutdown() {
         running = false;
 
         try {
-            if (serverSocket != null) serverSocket.close();
-            if (multicastSocket != null) multicastSocket.close();
+            if (multicastSocket != null) {
+                multicastSocket.leaveGroup(multicastGroup);
+                multicastSocket.close();
+            }
+            if (serverSocket != null) {
+                serverSocket.close();
+            }
         } catch (IOException e) {
-            System.err.println("Erreur lors de l'arrêt: " + e.getMessage());
+            System.err.println("Erreur fermeture: " + e.getMessage());
         }
 
-        networkExecutor.shutdown();
-        messageProcessor.shutdown();
-    }
-
-    /**
-     * Classe interne pour stocker un abonné et sa méthode.
-     */
-    private static class SubscriberMethod {
-        final Object instance;
-        final Method method;
-
-        SubscriberMethod(Object instance, Method method) {
-            this.instance = instance;
-            this.method = method;
-            this.method.setAccessible(true);
+        executor.shutdown();
+        try {
+            if (!executor.awaitTermination(2, TimeUnit.SECONDS)) {
+                executor.shutdownNow();
+            }
+        } catch (InterruptedException e) {
+            executor.shutdownNow();
+            Thread.currentThread().interrupt();
         }
     }
+
+    // Annotation Subscribe simplifiée
+    public @interface Subscribe {}
 }

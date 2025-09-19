@@ -9,6 +9,8 @@ package com.mycompany.app;
 public class UserMessage extends Message {
     private static final long serialVersionUID = 1L;
 
+    private String syncId; // Pour communication synchrone
+
     /**
      * Constructeur pour un message utilisateur.
      *
@@ -19,4 +21,7 @@ public class UserMessage extends Message {
     public UserMessage(Object payload, int timestamp, int sender) {
         super(payload, timestamp, sender, false);
     }
+
+    public String getSyncId() { return syncId; }
+    public void setSyncId(String syncId) { this.syncId = syncId; }
 }
